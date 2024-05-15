@@ -1,4 +1,6 @@
-﻿# NifSkope 2.0.dev9
+﻿# NifSkope 2.0.dev9 --- sf-mesh-update mod.
+
+Unless you are updating starfield model (.nif) files to work with Starfield 1.11.33, do not use this, use the normal NifSkope. This is a temporary get-it-out-the-door hot-off-the-presses version so caveat emptor.
 
 NifSkope is a tool for opening and editing the NetImmerse file format (NIF). NIF is used by video games such as Morrowind, Oblivion, Skyrim, Fallout 3/NV/4/76, Starfield, Civilization IV, and more.
 
