@@ -32,6 +32,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "message.h"
 #include "gl/gltex.h"
+#include "gl/glscene.h"
 #include "model/nifmodel.h"
 
 #include "lib/nvtristripwrapper.h"
@@ -47,8 +48,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <QSettings>
 #include <QTextStream>
 
-#define tr( x ) QApplication::tr( x )
+#include "gamemanager.h"
 
+#define tr( x ) QApplication::tr( x )
 
 /**
  * TODO LIST:
@@ -518,19 +520,19 @@ QDomElement textureElement( const NifModel * nif, QDomElement effect, QModelInde
 	Q_UNUSED( nif ); Q_UNUSED( idx );
 	QDomElement ret;
 	qint32 texIdx = nif->getLink( childNode, "Source" );
-	QModelIndex iTexture = nif->getBlock( texIdx, "NiSourceTexture" );
+	QModelIndex iTexture = nif->getBlockIndex( texIdx, "NiSourceTexture" );
 	int uvSet = nif->get<int>( childNode, "UV Set" );
 
 	if ( !iTexture.isValid() ) {
 		// try to use NiTextureProperty attributes
 		texIdx = nif->getLink( childNode, "Image" );
-		iTexture = nif->getBlock( texIdx, "NiImage" );
+		iTexture = nif->getBlockIndex( texIdx, "NiImage" );
 		uvSet = 0; // NiTextureProperty only have one texture
 	}
 
 	if ( iTexture.isValid() ) {
 		// we have texture
-		QFileInfo textureFile = nif->get<QString>( iTexture, "File Name" );
+		QFileInfo textureFile( nif->get<QString>( iTexture, "File Name" ) );
 
 		// surface
 		QDomElement newparam = doc.createElement( "newparam" );
@@ -587,7 +589,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 	bool haveColors = false;
 	bool haveMaterial = false;
 	int haveUV = 0;
-	QModelIndex iBlock = nif->getBlock( idx );
+	QModelIndex iBlock = nif->getBlockIndex( idx );
 	QDomElement extra;
 	QDomElement textureBaseTexture;
 	QDomElement textureDarkTexture;
@@ -603,9 +605,9 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 		return;
 
 	foreach ( qint32 link, nif->getChildLinks( idx ) ) {
-		QModelIndex iProp = nif->getBlock( link );
+		QModelIndex iProp = nif->getBlockIndex( link );
 
-		if ( nif->inherits( iProp, "NiTexturingProperty" ) ) {
+		if ( nif->blockInherits( iProp, "NiTexturingProperty" ) ) {
 			if ( !effect.isElement() ) {
 				effect = doc.createElement( "effect" );
 				effect.setAttribute( "id", QString( "nifid_%1-effect" ).arg( idx ) );
@@ -622,7 +624,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 			textureGlowTexture = textureElement( nif, profile, nif->getIndex( iProp, "Glow Texture" ), idx );
 
 			// TODO: Shader Textures array and mapping (for DAoC check NiIntegerExtraData for order)
-		} else if ( nif->inherits( iProp, "NiTextureProperty" ) ) {
+		} else if ( nif->blockInherits( iProp, "NiTextureProperty" ) ) {
 			if ( !effect.isElement() ) {
 				effect = doc.createElement( "effect" );
 				effect.setAttribute( "id", QString( "nifid_%1-effect" ).arg( idx ) );
@@ -632,7 +634,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 				profile = doc.createElement( "profile_COMMON" );
 
 			textureBaseTexture = textureElement( nif, profile, iProp, idx );
-		} else if ( nif->inherits( iProp, "NiMaterialProperty" ) || nif->inherits( iProp, "BSLightingShaderProperty" ) ) {
+		} else if ( nif->blockInherits( iProp, "NiMaterialProperty" ) || nif->blockInherits( iProp, "BSLightingShaderProperty" ) ) {
 			if ( !effect.isElement() ) {
 				effect = doc.createElement( "effect" );
 				effect.setAttribute( "id", QString( "nifid_%1-effect" ).arg( idx ) );
@@ -644,7 +646,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 			// BSLightingShaderProperty inherits textures .. so it's bit ugly hack
 			// 0 = diffuse, 1 = normal
 			qint32 subIdx = nif->getLink( iProp, "Texture Set" );
-			QModelIndex iTextures = nif->getBlock( subIdx );
+			QModelIndex iTextures = nif->getBlockIndex( subIdx );
 
 			if ( iTextures.isValid() ) {
 				int tCount = nif->get<int>( iTextures, "Num Textures" );
@@ -745,7 +747,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 
 			if ( extra.isElement() )
 				profile.appendChild( extra );
-		} else if ( nif->inherits( iProp, "NiTriBasedGeomData" ) ) {
+		} else if ( nif->blockInherits( iProp, "NiTriBasedGeomData" ) ) {
 			QDomElement geometry = doc.createElement( "geometry" );
 			geometry.setAttribute( "id", QString( "nifid_%1-lib" ).arg( idx ) );
 			geometry.setAttribute( "name", QString( "%1-lib" ).arg( nif->get<QString>( iBlock, "Name" ).replace( QRegularExpression( "\\W" ), "_" ) ) );
@@ -766,11 +768,11 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 			}
 
 			// UV maps
-			int uvCount = (nif->get<int>( iProp, "Num UV Sets" ) & 63) | (nif->get<int>( iProp, "BS Num UV Sets" ) & 1);
+			int uvCount = (nif->get<int>( iProp, "Data Flags" ) & 63) | (nif->get<int>( iProp, "BS Data Flags" ) & 1);
 			QModelIndex iUV = nif->getIndex( iProp, "UV Sets" );
 
 			for ( int row = 0; row < uvCount; row++ ) {
-				QVector<Vector2> uvMap = nif->getArray<Vector2>( iUV.child( row, 0 ) );
+				QVector<Vector2> uvMap = nif->getArray<Vector2>( QModelIndex_child( iUV, row ) );
 				mesh.appendChild( uvMapElement( uvMap, idx, row ) );
 
 				if ( uvMap.size() > 0 )
@@ -845,7 +847,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 				QVector<QVector<quint16> > strips;
 
 				for ( int r = 0; r < nif->rowCount( iPoints ); r++ )
-					strips.append( nif->getArray<quint16>( iPoints.child( r, 0 ) ) );
+					strips.append( nif->getArray<quint16>( QModelIndex_child( iPoints, r ) ) );
 
 				tri = triangulate( strips );
 			} else {
@@ -912,7 +914,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
 				instanceMaterial.appendChild( bind_vertex_input );
 			}
 		} else {
-			qDebug() << "NOT_USED_PROPERTY:" << nif->getBlockName( iProp );
+			qDebug() << "NOT_USED_PROPERTY:" << nif->itemName( iProp );
 		}
 
 		if ( effect.isElement() )
@@ -928,7 +930,7 @@ void attachNiShape ( const NifModel * nif, QDomElement parentNode, int idx )
  */
 void attachNiNode ( const NifModel * nif, QDomElement parentNode, int idx )
 {
-	QModelIndex iBlock = nif->getBlock( idx );
+	QModelIndex iBlock = nif->getBlockIndex( idx );
 
 	// export culling
 	if ( culling && !cullRegExp.pattern().isEmpty() && nif->get<QString>( iBlock, "Name" ).contains( cullRegExp ) )
@@ -946,12 +948,12 @@ void attachNiNode ( const NifModel * nif, QDomElement parentNode, int idx )
 	// parent attach and new loop
 	parentNode.appendChild( node );
 	foreach ( int l, nif->getChildLinks( idx ) ) {
-		QModelIndex iChild = nif->getBlock( l );
+		QModelIndex iChild = nif->getBlockIndex( l );
 
 		if ( iChild.isValid() ) {
-			if ( nif->inherits( iChild, "NiNode" ) )
+			if ( nif->blockInherits( iChild, "NiNode" ) )
 				attachNiNode( nif, node, l );
-			else if ( nif->inherits( iChild, "NiTriBasedGeom" ) )
+			else if ( nif->blockInherits( iChild, "NiTriBasedGeom" ) )
 				attachNiShape( nif, node, l );
 			else {
 //				qDebug() << "NO_FUNC:" << type;
@@ -960,7 +962,7 @@ void attachNiNode ( const NifModel * nif, QDomElement parentNode, int idx )
 	}
 }
 
-void exportCol( const NifModel * nif, QFileInfo fileInfo )
+void exportCol( const NifModel * nif, [[maybe_unused]] const Scene* scene, QFileInfo fileInfo )
 {
 	//culling = Options::get()->exportCullEnabled();
 	//cullRegExp = Options::get()->cullExpression();
@@ -1031,18 +1033,18 @@ void exportCol( const NifModel * nif, QFileInfo fileInfo )
 
 	while ( !roots.empty() ) {
 		int idx = roots.takeFirst();
-		QModelIndex iBlock = nif->getBlock( idx );
+		QModelIndex iBlock = nif->getBlockIndex( idx );
 
 		// get more if NiNode
-		if ( nif->inherits( iBlock, "NiNode" ) )
+		if ( nif->blockInherits( iBlock, "NiNode" ) )
 			attachNiNode( nif, lv, idx );
 	}
 
-	QDomElement scene = doc.createElement( "scene" );
-	root.appendChild( scene );
+	QDomElement sceneElem = doc.createElement( "scene" );
+	root.appendChild(sceneElem);
 	QDomElement ivl = doc.createElement( "instance_visual_scene" );
 	ivl.setAttribute( "url", "#NifRootScene" );
-	scene.appendChild( ivl );
+	sceneElem.appendChild( ivl );
 	fobj.write( doc.toString().toLatin1() );
 	settings.setValue( "Path", QString( "%1/" ).arg( QFileInfo( fobj.fileName() ).path() ) );
 	QTextStream sobj( &fobj ); // let's save xml

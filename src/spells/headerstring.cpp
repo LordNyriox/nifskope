@@ -7,6 +7,10 @@
 #include <QListWidget>
 #include <QPushButton>
 
+#include "ui/widgets/filebrowser.h"
+#include "gamemanager.h"
+#include "libfo76utils/src/common.hpp"
+#include "libfo76utils/src/material.hpp"
 
 // Brief description is deliberately not autolinked to class Spell
 /*! \file headerstring.cpp
@@ -75,20 +79,24 @@ public:
 
 		return *txt_xpm_icon;
 	}
+	bool constant() const override final { return true; }
 	bool instant() const override final { return true; }
 
 	bool isApplicable( const NifModel * nif, const QModelIndex & index ) override final
 	{
-		NifValue::Type type = nif->getValue( index ).type();
-
-		if ( type == NifValue::tStringIndex )
-			return true;
-
-		if ( (type == NifValue::tString || type == NifValue::tFilePath) && nif->checkVersion( 0x14010003, 0 ) )
-			return true;
+		const NifItem * item = nif->getItem( index );
+		if ( item ) {
+			auto vt = item->valueType();
+			if ( vt == NifValue::tStringIndex )
+				return true;
+			if ( nif->checkVersion( 0x14010003, 0 ) && ( vt == NifValue::tString || vt == NifValue::tFilePath ) )
+				return true;
+		}
 
 		return false;
 	}
+
+	void browseMaterial( QLineEdit * le, quint32 bsVersion );
 
 	QModelIndex cast( NifModel * nif, const QModelIndex & index ) override final
 	{
@@ -99,7 +107,7 @@ public:
 		if ( nif->getValue( index ).type() != NifValue::tStringIndex || !nif->checkVersion( 0x14010003, 0 ) )
 			return index;
 
-		QModelIndex header = nif->getHeader();
+		QModelIndex header = nif->getHeaderIndex();
 		QVector<QString> stringVector = nif->getArray<QString>( header, "Strings" );
 		strings = stringVector.toList();
 
@@ -128,9 +136,20 @@ public:
 		QPushButton * bc = new QPushButton( Spell::tr( "Cancel" ), &dlg );
 		QObject::connect( bc, &QPushButton::clicked, &dlg, &QDialog::reject );
 
+		QPushButton * bm = nullptr;
+		if ( nif->getBSVersion() >= 130 ) {
+			bm = new QPushButton( Spell::tr( "Browse Materials" ), &dlg );
+			QObject::connect( bm, &QPushButton::clicked, le, [this, le, nif]() { browseMaterial( le, nif->getBSVersion() ); } );
+		}
+
 		QGridLayout * grid = new QGridLayout;
 		dlg.setLayout( grid );
-		grid->addWidget( lb, 0, 0, 1, 2 );
+		if ( !bm ) {
+			grid->addWidget( lb, 0, 0, 1, 2 );
+		} else {
+			grid->addWidget( lb, 0, 0, 1, 1 );
+			grid->addWidget( bm, 0, 1, 1, 1 );
+		}
 		grid->addWidget( lw, 1, 0, 1, 2 );
 		grid->addWidget( le, 2, 0, 1, 2 );
 		grid->addWidget( bo, 3, 0, 1, 1 );
@@ -139,11 +158,41 @@ public:
 		if ( dlg.exec() != QDialog::Accepted )
 			return index;
 
-		nif->set<QString>( index, le->text() );
+		if ( le->text() != string )
+			nif->set<QString>( index, le->text() );
 
 		return index;
 	}
 };
+
+static bool bgsmFileNameFilterFunc( [[maybe_unused]] void * p, const std::string_view & s )
+{
+	return ( s.starts_with( "materials/" ) && ( s.ends_with( ".bgsm" ) || s.ends_with( ".bgem" ) ) );
+}
+
+void spEditStringIndex::browseMaterial( QLineEdit * le, quint32 bsVersion )
+{
+	std::set< std::string_view >	materials;
+	AllocBuffers	stringBuf;
+	if ( bsVersion < 160 ) {
+		Game::GameManager::list_files( materials, ( bsVersion < 151 ? Game::FALLOUT_4 : Game::FALLOUT_76 ), &bgsmFileNameFilterFunc );
+	} else {
+		const CE2MaterialDB * matDB = Game::GameManager::materials( Game::STARFIELD );
+		if ( matDB )
+			matDB->getMaterialList( materials, stringBuf );
+	}
+
+	std::string	prvPath;
+	if ( !le->text().isEmpty() )
+		prvPath = Game::GameManager::get_full_path( le->text(), "materials", ( bsVersion >= 160 ? ".mat" : nullptr ) );
+
+	FileBrowserWidget	fileBrowser( 800, 600, "Select Material", materials, prvPath );
+	if ( fileBrowser.exec() == QDialog::Accepted ) {
+		const std::string_view *	s = fileBrowser.getItemSelected();
+		if ( s )
+			le->setText( QString::fromUtf8( s->data(), qsizetype(s->length()) ) );
+	}
+}
 
 REGISTER_SPELL( spEditStringIndex )
 

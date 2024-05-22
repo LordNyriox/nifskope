@@ -66,7 +66,7 @@ public:
 
 	const QVector<Node *> & list() const { return nodes; }
 
-	void sort();
+	void orderedNodeSort();
 	void alphaSort();
 
 protected:
@@ -94,7 +94,7 @@ class Node : public IControllable
 	} NodeFlags;
 
 public:
-	Node( Scene * scene, const QModelIndex & block );
+	Node( Scene * scene, const QModelIndex & iBlock );
 
 	static int SELECTING;
 
@@ -103,7 +103,6 @@ public:
 	// IControllable
 
 	void clear() override;
-	void update( const NifModel * nif, const QModelIndex & block ) override;
 	void transform() override;
 
 	// end IControllable
@@ -111,7 +110,7 @@ public:
 	virtual void transformShapes();
 
 	virtual void draw();
-	virtual void drawShapes( NodeList * secondPass = nullptr, bool presort = false );
+	virtual void drawShapes( NodeList * secondPass = nullptr );
 	virtual void drawHavok();
 	virtual void drawFurn();
 	virtual void drawSelection() const;
@@ -129,7 +128,7 @@ public:
 
 	bool isVisible() const { return !isHidden(); }
 	bool isPresorted() const { return presorted; }
-	
+
 	Node * findChild( int id ) const;
 	Node * findChild( const QString & str ) const;
 
@@ -149,6 +148,8 @@ public slots:
 
 protected:
 	void setController( const NifModel * nif, const QModelIndex & controller ) override;
+	void updateImpl( const NifModel * nif, const QModelIndex & block ) override;
+
 	// Old Options API
 	//	TODO: Move away from the GL-like naming
 	void glHighlightColor() const;
@@ -198,7 +199,6 @@ public:
 	// IControllable
 
 	void clear() override;
-	void update( const NifModel * nif, const QModelIndex & block ) override;
 	void transform() override;
 
 	// end IControllable
@@ -208,6 +208,8 @@ protected:
 	QPersistentModelIndex iData;
 
 	Vector3 center;
+
+	void updateImpl( const NifModel * nif, const QModelIndex & block ) override;
 };
 
 //! A Node that always faces the camera

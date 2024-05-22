@@ -37,12 +37,10 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "gl/gltexloaders.h"
 #include "model/nifmodel.h"
 
-#include <fsengine/fsengine.h>
-#include <fsengine/fsmanager.h>
+#include "gamemanager.h"
 
 #include <QDebug>
 #include <QDir>
-#include <QFileSystemWatcher>
 #include <QListView>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
@@ -54,20 +52,22 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //! @file gltex.cpp TexCache management
 
 #ifdef WIN32
-PFNGLACTIVETEXTUREARBPROC glActiveTextureARB = nullptr;
-PFNGLCLIENTACTIVETEXTUREARBPROC glClientActiveTextureARB = nullptr;
+static PFNGLACTIVETEXTUREPROC glActiveTexture = nullptr;
+static PFNGLCLIENTACTIVETEXTUREPROC glClientActiveTexture = nullptr;
 #endif
 
-//! Number of texture units
-GLint num_texture_units = 0;
+int TexCache::num_texture_units = 0;
+int TexCache::num_txtunits_client = 0;
+int TexCache::pbrCubeMapResolution = 256;
 
 //! Maximum anisotropy
 float max_anisotropy = 1.0f;
 void set_max_anisotropy()
 {
 	static QSettings settings;
-	max_anisotropy = std::min( std::pow( settings.value( "Settings/Render/General/Anisotropic Filtering", 4.0 ).toFloat(), 2.0f ),
-								max_anisotropy );
+	int	tmp = roundFloat( settings.value( "Settings/Render/General/Anisotropic Filtering", 4.0 ).toFloat() );
+	tmp = 1 << std::min< int >( std::max< int >( tmp, 0 ), 4 );
+	max_anisotropy = std::min( float( tmp ), max_anisotropy );
 }
 
 float get_max_anisotropy()
@@ -78,15 +78,18 @@ float get_max_anisotropy()
 void initializeTextureUnits( const QOpenGLContext * context )
 {
 	if ( context->hasExtension( "GL_ARB_multitexture" ) ) {
-		glGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS_ARB, &num_texture_units );
+		GLint	tmp = 0;
+		glGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS, &tmp );
+		tmp = std::min( std::max( tmp, GLint(1) ), GLint(32) );
+		TexCache::num_texture_units = tmp;
+		glGetIntegerv( GL_MAX_TEXTURE_COORDS, &tmp );
+		TexCache::num_txtunits_client = std::max( tmp, GLint(1) );
 
-		if ( num_texture_units < 1 )
-			num_texture_units = 1;
-
-		//qDebug() << "texture units" << num_texture_units;
+		//qDebug() << "texture units" << TexCache::num_texture_units;
 	} else {
 		qCWarning( nsGl ) << QObject::tr( "Multitexturing not supported." );
-		num_texture_units = 1;
+		TexCache::num_texture_units = 1;
+		TexCache::num_txtunits_client = 1;
 	}
 
 	if ( context->hasExtension( "GL_EXT_texture_filter_anisotropic" ) ) {
@@ -96,25 +99,26 @@ void initializeTextureUnits( const QOpenGLContext * context )
 	}
 
 #ifdef WIN32
-	if ( !glActiveTextureARB )
-		glActiveTextureARB = (PFNGLACTIVETEXTUREARBPROC)context->getProcAddress( "glActiveTextureARB" );
+	if ( !glActiveTexture )
+		glActiveTexture = (PFNGLACTIVETEXTUREPROC)context->getProcAddress( "glActiveTexture" );
 
-	if ( !glClientActiveTextureARB )
-		glClientActiveTextureARB = (PFNGLCLIENTACTIVETEXTUREARBPROC)context->getProcAddress( "glClientActiveTextureARB" );
+	if ( !glClientActiveTexture )
+		glClientActiveTexture = (PFNGLCLIENTACTIVETEXTUREPROC)context->getProcAddress( "glClientActiveTexture" );
 #endif
 
 	initializeTextureLoaders( context );
 }
 
-bool activateTextureUnit( int stage )
+bool activateTextureUnit( int stage, bool noClient )
 {
-	if ( num_texture_units <= 1 )
+	if ( TexCache::num_texture_units <= 1 )
 		return ( stage == 0 );
 
-	if ( stage < num_texture_units ) {
+	if ( stage < TexCache::num_texture_units ) {
 
-		glActiveTextureARB( GL_TEXTURE0 + stage );
-		glClientActiveTextureARB( GL_TEXTURE0 + stage );
+		glActiveTexture( GL_TEXTURE0 + stage );
+		if ( stage < TexCache::num_txtunits_client && !noClient )
+			glClientActiveTexture( GL_TEXTURE0 + stage );
 		return true;
 	}
 
@@ -123,19 +127,21 @@ bool activateTextureUnit( int stage )
 
 void resetTextureUnits( int numTex )
 {
-	if ( num_texture_units <= 1 ) {
+	if ( TexCache::num_texture_units <= 1 ) {
 		glDisable( GL_TEXTURE_2D );
 		return;
 	}
 
-	for ( int x = numTex - 1; x >= 0; x-- ) {
-		glActiveTextureARB( GL_TEXTURE0 + x );
+	for ( int x = std::min( numTex, TexCache::num_texture_units ); --x >= 0; ) {
+		glActiveTexture( GL_TEXTURE0 + x );
 		glDisable( GL_TEXTURE_2D );
 		glMatrixMode( GL_TEXTURE );
 		glLoadIdentity();
 		glMatrixMode( GL_MODELVIEW );
-		glClientActiveTextureARB( GL_TEXTURE0 + x );
-		glDisableClientState( GL_TEXTURE_COORD_ARRAY );
+		if ( x < TexCache::num_txtunits_client ) {
+			glClientActiveTexture( GL_TEXTURE0 + x );
+			glDisableClientState( GL_TEXTURE_COORD_ARRAY );
+		}
 	}
 }
 
@@ -146,8 +152,6 @@ void resetTextureUnits( int numTex )
 
 TexCache::TexCache( QObject * parent ) : QObject( parent )
 {
-	watcher = new QFileSystemWatcher( this );
-	connect( watcher, &QFileSystemWatcher::fileChanged, this, &TexCache::fileChanged );
 }
 
 TexCache::~TexCache()
@@ -155,129 +159,30 @@ TexCache::~TexCache()
 	//flush();
 }
 
-QString TexCache::find( const QString & file, const QString & nifdir )
-{
-	return find( file, nifdir, *(new QByteArray()) );
-}
-
-QString TexCache::find( const QString & file, const QString & nifdir, QByteArray & data )
+QString TexCache::find( const QString & file, Game::GameMode game )
 {
 	if ( file.isEmpty() )
 		return QString();
-
-	if ( QFile( file ).exists() )
+	if ( file.startsWith("#") && (file.length() == 9 || file.length() == 10) )
 		return file;
 
-	QSettings settings;
+	QString filename( file );
 
-	QString filename = QDir::toNativeSeparators( file );
+	static const char *	extensions[6] = {
+		".dds", ".tga", ".png", ".bmp", ".nif", ".texcache"
+	};
 
-	QStringList extensions;
-	extensions << ".dds";
-	bool replaceExt = false;
-
-	bool textureAlternatives = settings.value( "Settings/Resources/Alternate Extensions", false ).toBool();
-	if ( textureAlternatives ) {
-		extensions << ".tga" << ".bmp" << ".nif" << ".texcache";
-		for ( const QString ext : QStringList{ extensions } )
-		{
-			if ( filename.endsWith( ext, Qt::CaseInsensitive ) ) {
-				extensions.removeAll( ext );
-				extensions.prepend( ext );
-				filename = filename.left( filename.length() - ext.length() );
-				replaceExt = true;
+	// attempt to find the texture with one of the extensions
+	for ( size_t i = 0; i < 6; i++ ) {
+		QString	fullPath( Game::GameManager::find_file(game, filename, "textures", extensions[i]) );
+		if ( !fullPath.isEmpty() )
+			return fullPath;
+		if ( i == 0 ) {
+			QSettings settings;
+			if ( !settings.value( "Settings/Resources/Alternate Extensions", false ).toBool() )
 				break;
-			}
 		}
 	}
-
-	// attempt to find the texture in one of the folders
-	QDir dir;
-	for ( const QString& ext : extensions ) {
-		if ( replaceExt ) {
-			filename += ext;
-		}
-
-		auto appdir = QDir::currentPath();
-		
-		// First search NIF root
-		dir.setPath( nifdir );
-		if ( dir.exists( filename ) ) {
-			return dir.filePath( filename );
-		}
-
-		// Next search NifSkope dir
-		dir.setPath( appdir );
-		if ( dir.exists( filename ) ) {
-			return dir.filePath( filename );
-		}
-
-		
-		QStringList folders = settings.value( "Settings/Resources/Folders", QStringList() ).toStringList();
-
-		for ( QString folder : folders ) {
-			// TODO: Always search nifdir without requiring a relative entry
-			// in folders?  Not too intuitive to require ".\" in your texture folder list
-			// even if it is added by default.
-			if ( folder.startsWith( "./" ) || folder.startsWith( ".\\" ) ) {
-				folder = nifdir + "/" + folder;
-			}
-
-			dir.setPath( folder );
-
-			if ( dir.exists( filename ) ) {
-				filename = dir.filePath( filename );
-				filename = QDir::toNativeSeparators( filename );
-				return filename;
-			}
-		}
-
-		// Search through archives last, and load any requested textures into memory.
-		for ( FSArchiveFile * archive : FSManager::archiveList() ) {
-			if ( archive ) {
-				filename = QDir::fromNativeSeparators( filename.toLower() );
-				if ( archive->hasFile( filename ) ) {
-					QByteArray outData;
-					archive->fileContents( filename, outData );
-
-					if ( !outData.isEmpty() ) {
-						data = outData;
-						filename = QDir::toNativeSeparators( filename );
-						return filename;
-					}
-				}
-			}
-		}
-
-		// For Skyrim and FO4 which occasionally leave the textures off
-		if ( !filename.startsWith( "textures", Qt::CaseInsensitive ) ) {
-			QRegularExpression re( "textures[\\\\/]", QRegularExpression::CaseInsensitiveOption );
-			int texIdx = filename.indexOf( re );
-			if ( texIdx > 0 ) {
-				filename.remove( 0, texIdx );
-			} else {
-				while ( filename.startsWith( "/" ) || filename.startsWith( "\\" ) )
-					filename.remove( 0, 1 );
-
-				if ( !filename.startsWith( "textures", Qt::CaseInsensitive ) && !filename.startsWith( "shaders", Qt::CaseInsensitive ) )
-					filename.prepend( "textures\\" );
-			}
-
-			return find( filename, nifdir, data );
-		}
-
-		if ( !replaceExt )
-			break;
-
-		// Remove file extension
-		filename = filename.left( filename.length() - ext.length() );
-	}
-
-	// Fix separators
-	filename = QDir::toNativeSeparators( filename );
-
-	if ( replaceExt )
-		return filename + extensions.value( 0 ); // Restore original file extension
 
 	return filename;
 }
@@ -295,6 +200,8 @@ QString TexCache::stripPath( const QString & filepath, const QString & nifFolder
 	QDir basePath;
 
 	QSettings settings;
+
+	// TODO: New asset manager support
 	QStringList folders = settings.value( "Settings/Resources/Folders", QStringList() ).toStringList();
 
 	for ( QString base : folders ) {
@@ -332,97 +239,59 @@ bool TexCache::isSupported( const QString & filePath )
 	return texIsSupported( filePath );
 }
 
-void TexCache::fileChanged( const QString & filepath )
-{
-	QMutableHashIterator<QString, Tex *> it( textures );
-
-	while ( it.hasNext() ) {
-		it.next();
-
-		Tex * tx = it.value();
-
-		if ( tx && tx->filepath == filepath ) {
-			// Remove from watcher now to prevent multiple signals
-			watcher->removePath( tx->filepath );
-			if ( QFile::exists( tx->filepath ) ) {
-				tx->reload = true;
-				emit sigRefresh();
-			} else {
-				it.remove();
-
-				if ( tx->id )
-					glDeleteTextures( 1, &tx->id );
-
-				delete tx;
-			}
-		}
-	}
-}
-
-int TexCache::bind( const QString & fname )
+int TexCache::bind( const QString & fname, Game::GameMode game, bool useSecondTexture )
 {
 	Tex * tx = textures.value( fname );
-	if ( !tx ) {
+	if ( !tx ) [[unlikely]] {
 		tx = new Tex;
 		tx->filename = fname;
-		tx->id = 0;
-		tx->data = QByteArray();
+		tx->id[0] = 0;
+		tx->id[1] = 0;
 		tx->mipmaps = 0;
-		tx->reload  = false;
+		tx->game = game;
 
 		textures.insert( tx->filename, tx );
 
-		if ( !isSupported( fname ) )
-			tx->id = 0xFFFFFFFF;
+		if ( !isSupported( fname ) ) {
+			tx->id[0] = 0xFFFFFFFF;
+		} else {
+			tx->filepath = find( tx->filename, game );
+			tx->load();
+			return tx->mipmaps;
+		}
 	}
 
-	if ( tx->id == 0xFFFFFFFF )
+	if ( tx->id[0] == 0xFFFFFFFF ) [[unlikely]]
+		return 0;
+	if ( !tx->id[size_t(useSecondTexture)] ) [[unlikely]]
 		return 0;
 
-	QByteArray outData;
-
-	if ( tx->filepath.isEmpty() || tx->reload )
-		tx->filepath = find( tx->filename, nifFolder, outData );
-
-	if ( !outData.isEmpty() || tx->reload ) {
-		tx->data = outData;
-	}
-
-	if ( !tx->id || tx->reload ) {
-		if ( QFile::exists( tx->filepath ) && QFileInfo( tx->filepath ).isWritable()
-			 && ( !watcher->files().contains( tx->filepath ) ) )
-			watcher->addPath( tx->filepath );
-
-		tx->load();
-	} else {
-		if ( !tx->target )
-			tx->target = GL_TEXTURE_2D;
-
-		glBindTexture( tx->target, tx->id );
-	}
+	if ( !tx->target ) [[unlikely]]
+		tx->target = GL_TEXTURE_2D;
+	glBindTexture( tx->target, tx->id[size_t(useSecondTexture)] );
 
 	return tx->mipmaps;
 }
 
-int TexCache::bind( const QModelIndex & iSource )
+int TexCache::bind( const QModelIndex & iSource, Game::GameMode game )
 {
-	const NifModel * nif = qobject_cast<const NifModel *>( iSource.model() );
-
-	if ( nif && iSource.isValid() ) {
+	auto nif = NifModel::fromValidIndex(iSource);
+	if ( nif ) {
 		if ( nif->get<quint8>( iSource, "Use External" ) == 0 ) {
-			QModelIndex iData = nif->getBlock( nif->getLink( iSource, "Pixel Data" ) );
+			QModelIndex iData = nif->getBlockIndex( nif->getLink( iSource, "Pixel Data" ) );
 
 			if ( iData.isValid() ) {
 				Tex * tx = embedTextures.value( iData );
 
 				if ( !tx ) {
 					tx = new Tex();
-					tx->id = 0;
-					tx->reload = false;
+					tx->id[0] = 0;
+					tx->id[1] = 0;
+					tx->game = game;
 					try
 					{
-						glGenTextures( 1, &tx->id );
-						glBindTexture( GL_TEXTURE_2D, tx->id );
+						glGenTextures( 1, tx->id );
+						glBindTexture( GL_TEXTURE_2D, tx->id[0] );
 						embedTextures.insert( iData, tx );
 						texLoad( iData, tx->format, tx->target, tx->width, tx->height, tx->mipmaps, tx->id );
 					}
@@ -430,13 +299,13 @@ int TexCache::bind( const QModelIndex & iSource )
 						tx->status = e;
 					}
 				} else {
-					glBindTexture( GL_TEXTURE_2D, tx->id );
+					glBindTexture( GL_TEXTURE_2D, tx->id[0] );
 				}
 
 				return tx->mipmaps;
 			}
 		} else if ( !nif->get<QString>( iSource, "File Name" ).isEmpty() ) {
-			return bind( nif->get<QString>( iSource, "File Name" ) );
+			return bind( nif->get<QString>( iSource, "File Name" ), game );
 		}
 	}
 
@@ -446,27 +315,23 @@ int TexCache::bind( const QModelIndex & iSource )
 void TexCache::flush()
 {
 	for ( Tex * tx : textures ) {
-		if ( tx->id )
-			glDeleteTextures( 1, &tx->id );
+		if ( tx->id[0] )
+			glDeleteTextures( ( !tx->id[1] ? 1 : 2 ), tx->id );
 	}
 	qDeleteAll( textures );
 	textures.clear();
 
 	for ( Tex * tx : embedTextures ) {
-		if ( tx->id )
-			glDeleteTextures( 1, &tx->id );
+		if ( tx->id[0] )
+			glDeleteTextures( ( !tx->id[1] ? 1 : 2 ), tx->id );
 	}
 	qDeleteAll( embedTextures );
 	embedTextures.clear();
-
-	if ( !watcher->files().empty() ) {
-		watcher->removePaths( watcher->files() );
-	}
 }
 
 void TexCache::setNifFolder( const QString & folder )
 {
-	nifFolder = folder;
+	(void) folder;
 	flush();
 	emit sigRefresh();
 }
@@ -474,19 +339,19 @@ void TexCache::setNifFolder( const QString & folder )
 QString TexCache::info( const QModelIndex & iSource )
 {
 	QString temp;
-	const NifModel * nif = qobject_cast<const NifModel *>( iSource.model() );
 
-	if ( nif && iSource.isValid() ) {
+	auto nif = NifModel::fromValidIndex(iSource);
+	if ( nif ) {
 		if ( nif->get<quint8>( iSource, "Use External" ) == 0 ) {
-			QModelIndex iData = nif->getBlock( nif->getLink( iSource, "Pixel Data" ) );
+			QModelIndex iData = nif->getBlockIndex( nif->getLink( iSource, "Pixel Data" ) );
 
 			if ( iData.isValid() ) {
 				Tex * tx = embedTextures.value( iData );
 				temp = QString( "Embedded texture: %1\nWidth: %2\nHeight: %3\nMipmaps: %4" )
-				       .arg( tx->format )
-				       .arg( tx->width )
-				       .arg( tx->height )
-				       .arg( tx->mipmaps );
+						.arg( tx->format )
+						.arg( tx->width )
+						.arg( tx->height )
+						.arg( tx->mipmaps );
 			} else {
 				temp = QString( "Embedded texture invalid" );
 			}
@@ -494,12 +359,12 @@ QString TexCache::info( const QModelIndex & iSource )
 			QString filename = nif->get<QString>( iSource, "File Name" );
 			Tex * tx = textures.value( filename );
 			temp = QString( "External texture file: %1\nTexture path: %2\nFormat: %3\nWidth: %4\nHeight: %5\nMipmaps: %6" )
-			       .arg( tx->filename )
-			       .arg( tx->filepath )
-			       .arg( tx->format )
-			       .arg( tx->width )
-			       .arg( tx->height )
-			       .arg( tx->mipmaps );
+					.arg( tx->filename )
+					.arg( tx->filepath )
+					.arg( tx->format )
+					.arg( tx->width )
+					.arg( tx->height )
+					.arg( tx->mipmaps );
 		}
 	}
 
@@ -512,7 +377,8 @@ bool TexCache::exportFile( const QModelIndex & iSource, QString & filepath )
 
 	if ( !tx ) {
 		tx = new Tex();
-		tx->id = 0;
+		tx->id[0] = 0;
+		tx->id[1] = 0;
 	}
 
 	return tx->saveAsFile( iSource, filepath );
@@ -520,7 +386,7 @@ bool TexCache::exportFile( const QModelIndex & iSource, QString & filepath )
 
 bool TexCache::importFile( NifModel * nif, const QModelIndex & iSource, QModelIndex & iData )
 {
-	//const NifModel * nif = qobject_cast<const NifModel *>( iSource.model() );
+	// auto nif = NifModel::fromIndex(iSource);
 	if ( nif && iSource.isValid() ) {
 		if ( nif->get<quint8>( iSource, "Use External" ) == 1 ) {
 			QString filename = nif->get<QString>( iSource, "File Name" );
@@ -540,19 +406,19 @@ bool TexCache::importFile( NifModel * nif, const QModelIndex & iSource, QModelIn
 
 void TexCache::Tex::load()
 {
-	if ( !id )
-		glGenTextures( 1, &id );
+	if ( !id[0] )
+		glGenTextures( 1, id );
 
 	width  = height = mipmaps = 0;
-	reload = false;
 	status = QString();
 
 	if ( target )
-		glBindTexture( target, id );
+		glBindTexture( target, id[0] );
 
 	try
 	{
-		texLoad( filepath, format, target, width, height, mipmaps, data, id );
+		QByteArray	data;
+		texLoad( game, filepath, format, target, width, height, mipmaps, data, id );
 	}
 	catch ( QString & e )
 	{
@@ -576,5 +442,5 @@ bool TexCache::Tex::savePixelData( NifModel * nif, const QModelIndex & iSource, 
 	Q_UNUSED( iSource );
 	// gltexloaders function goes here
 	//qDebug() << "TexCache::Tex:savePixelData: Packing" << iSource << "from file" << filepath << "to" << iData;
-	return texSaveNIF( nif, filepath, iData );
+	return texSaveNIF( game, nif, filepath, iData );
 }

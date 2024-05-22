@@ -34,6 +34,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MATERIAL_H
 
 #include "data/niftypes.h"
+#include "gamemanager.h"
 
 #include <QObject>
 #include <QByteArray>
@@ -48,23 +49,21 @@ class Material : public QObject
 	Q_OBJECT
 
 	friend class Renderer;
-	friend class BSShape;
-	friend class BSShaderLightingProperty;
-	friend class BSLightingShaderProperty;
-	friend class BSEffectShaderProperty;
+	friend class NifModel;
 
 public:
-	Material( QString name );
+	Material( QString name, Game::GameMode game );
 
 	bool isValid() const;
+	bool hasAlphaBlend() const { return (bAlphaBlend != 0); }
+	bool hasAlphaTest() const { return (bAlphaTest != 0); }
+	bool hasDecal() const { return (bDecal != 0); }
 	QStringList textures() const;
 	QString getPath() const;
 
 protected:
+	bool openFile();
 	virtual bool readFile();
-	QByteArray find( QString path );
-	QString toLocalPath( QString path ) const;
-
 
 	QStringList textureList;
 
@@ -108,6 +107,16 @@ protected:
 	quint8 bEnvironmentMapping = 0;
 	float fEnvironmentMappingMaskScale = 1.0;
 	quint8 bGrayscaleToPaletteColor = 1.0;
+	quint8 ucMaskWrites = 63;
+
+	Color3 cEmittanceColor = Color3( 0.0f, 0.0f, 0.0f );
+
+	quint8 bGlowmap = 0;
+
+	float fLumEmittance = 100.0;
+	float fAdaptativeEmissive_ExposureOffset = 13.5;
+	float fAdaptativeEmissive_FinalExposureMin = 2.0;
+	float fAdaptativeEmissive_FinalExposureMax = 3.0;
 };
 
 
@@ -116,12 +125,12 @@ class ShaderMaterial : public Material
 	Q_OBJECT
 
 	friend class Renderer;
-	friend class BSShape;
 	friend class BSShaderLightingProperty;
 	friend class BSLightingShaderProperty;
+	friend class NifModel;
 
 public:
-	ShaderMaterial( QString name );
+	ShaderMaterial( QString name, Game::GameMode game );
 
 protected:
 	bool readFile() override final;
@@ -133,7 +142,6 @@ protected:
 	quint8 bSubsurfaceLighting = 0;
 	float fSubsurfaceLightingRolloff = 0.0;
 	quint8 bSpecularEnabled = 1;
-	float specR = 1.0, specG = 1.0, specB = 1.0;
 	Color3 cSpecularColor;
 	float fSpecularMult = 0;
 	float fSmoothness = 0;
@@ -147,8 +155,6 @@ protected:
 	QString sRootMaterialPath;
 	quint8 bAnisoLighting = 0;
 	quint8 bEmitEnabled = 0;
-	float emitR = 0, emitG = 0, emitB = 0;
-	Color3 cEmittanceColor;
 	float fEmittanceMult = 0;
 	quint8 bModelSpaceNormals = 0;
 	quint8 bExternalEmittance = 0;
@@ -158,12 +164,10 @@ protected:
 	quint8 bCastShadows = 1;
 	quint8 bDissolveFade = 0;
 	quint8 bAssumeShadowmask = 0;
-	quint8 bGlowmap = 0;
 	quint8 bEnvironmentMappingWindow = 0;
 	quint8 bEnvironmentMappingEye = 0;
 	quint8 bHair = 0;
-	float hairR = 0, hairG = 0, hairB = 0;
-	Color3 cHairTintColor;
+	Color3 cHairTintColor = Color3( 0.0f, 0.0f, 0.0f );
 	quint8 bTree = 0;
 	quint8 bFacegen = 0;
 	quint8 bSkinTint = 0;
@@ -176,6 +180,24 @@ protected:
 	float fGrayscaleToPaletteScale = 0;
 	quint8 bSkewSpecularAlpha = 0;
 
+	quint8 bPBR = 0;
+
+	quint8 bTranslucency = 0;
+	quint8 bTranslucencyThickObject = 0;
+	quint8 bTranslucencyMixAlbedoWithSubsurfaceCol = 0;
+	Color3 cTranslucencySubsurfaceColor = Color3( 0.0f, 0.0f, 0.0f );
+	float fTranslucencyTransmissiveScale = 0.0;
+	float fTranslucencyTurbulence = 0.0;
+
+	quint8 bCustomPorosity = 0;
+	float fPorosityValue = 0.0;
+
+	quint8 bUseAdaptativeEmissive = 0;
+
+	quint8 bTerrain = 0;
+	float fTerrainThresholdFalloff = 0.0;
+	float fTerrainTilingDistance = 0.0;
+	float fTerrainRotationAngle = 0.0;
 };
 
 
@@ -184,12 +206,12 @@ class EffectMaterial : public Material
 	Q_OBJECT
 
 	friend class Renderer;
-	friend class BSShape;
 	friend class BSShaderLightingProperty;
 	friend class BSEffectShaderProperty;
+	friend class NifModel;
 
 public:
-	EffectMaterial( QString name );
+	EffectMaterial( QString name, Game::GameMode game );
 
 protected:
 	bool readFile() override final;
@@ -200,7 +222,6 @@ protected:
 	quint8 bFalloffColorEnabled = 0;
 	quint8 bGrayscaleToPaletteAlpha = 0;
 	quint8 bSoftEnabled = 0;
-	float baseR = 1.0, baseG = 1.0, baseB = 1.0;
 	Color3 cBaseColor;
 	float fBaseColorScale = 1.0;
 	float fFalloffStartAngle = 1.0;
@@ -210,6 +231,13 @@ protected:
 	float fLightingInfluence = 1.0;
 	quint8 iEnvmapMinLOD = 0;
 	float fSoftDepth = 100.0;
+
+	quint8 bEffectPbrSpecular = 0;
+	// version >= 21
+	quint8 bGlassEnabled = 0;
+	Color3 cGlassFresnelColor;
+	float fGlassRefractionScaleBase = 0.0f;
+	float fGlassBlurScaleBase = 0.0f;
 };
 
 

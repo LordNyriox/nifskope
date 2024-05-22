@@ -43,6 +43,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <algorithm>
 #include <functional>
 
+#include "libfo76utils/src/fp32vec4.hpp"
+#include "gamemanager.h"
+#include "miniball/Seb.h"
 
 //! \file gltools.cpp GL helper functions
 
@@ -57,7 +60,7 @@ BoneWeights::BoneWeights( const NifModel * nif, const QModelIndex & index, int b
 	QModelIndex idxWeights = nif->getIndex( index, "Vertex Weights" );
 	if ( vcnt && idxWeights.isValid() ) {
 		for ( int c = 0; c < nif->rowCount( idxWeights ); c++ ) {
-			QModelIndex idx = idxWeights.child( c, 0 );
+			QModelIndex idx = QModelIndex_child( idxWeights, c );
 			weights.append( VertexWeight( nif->get<int>( idx, "Index" ), nif->get<float>( idx, "Weight" ) ) );
 		}
 	}
@@ -69,6 +72,14 @@ void BoneWeights::setTransform( const NifModel * nif, const QModelIndex & index 
 	auto sph = BoundSphere( nif, index );
 	center = sph.center;
 	radius = sph.radius;
+}
+
+BoneWeightsUNorm::BoneWeightsUNorm( QVector<QPair<quint16, quint16>> weights, [[maybe_unused]] int v )
+{
+	weightsUNORM.resize(weights.size());
+	for ( int i = 0; i < weights.size(); i++ ) {
+		weightsUNORM[i] = BoneWeightUNORM16(weights[i].first, weights[i].second / 65535.0);
+	}
 }
 
 
@@ -94,8 +105,8 @@ SkinPartition::SkinPartition( const NifModel * nif, const QModelIndex & index )
 
 	for ( int v = 0; v < vertexMap.count(); v++ ) {
 		for ( int w = 0; w < numWeightsPerVertex; w++ ) {
-			QModelIndex iw = iWeights.child( v, 0 ).child( w, 0 );
-			QModelIndex ib = iBoneIndices.child( v, 0 ).child( w, 0 );
+			QModelIndex iw = QModelIndex_child( QModelIndex_child( iWeights, v ), w );
+			QModelIndex ib = QModelIndex_child( QModelIndex_child( iBoneIndices, v ), w );
 
 			weights[ v * numWeightsPerVertex + w ].first  = ( ib.isValid() ? nif->get<int>( ib ) : 0 );
 			weights[ v * numWeightsPerVertex + w ].second = ( iw.isValid() ? nif->get<float>( iw ) : 0 );
@@ -105,7 +116,7 @@ SkinPartition::SkinPartition( const NifModel * nif, const QModelIndex & index )
 	QModelIndex iStrips = nif->getIndex( index, "Strips" );
 
 	for ( int s = 0; s < nif->rowCount( iStrips ); s++ ) {
-		tristrips << nif->getArray<quint16>( iStrips.child( s, 0 ) );
+		tristrips << nif->getArray<quint16>( QModelIndex_child( iStrips, s ) );
 	}
 
 	triangles = nif->getArray<Triangle>( index, "Triangles" );
@@ -167,27 +178,103 @@ BoundSphere::BoundSphere( const NifModel * nif, const QModelIndex & index )
 	radius = nif->get<float>( idx, "Radius" );
 }
 
-BoundSphere::BoundSphere( const QVector<Vector3> & verts )
+BoundSphere::BoundSphere( const QVector<Vector3> & verts, bool useMiniball )
 {
 	if ( verts.isEmpty() ) {
 		center = Vector3();
 		radius = -1;
-	} else {
-		center = Vector3();
-		for ( const Vector3& v : verts ) {
-			center += v;
-		}
-		center /= verts.count();
-
-		radius = 0;
-		for ( const Vector3& v : verts ) {
-			float d = ( center - v ).squaredLength();
-
-			if ( d > radius )
-				radius = d;
-		}
-		radius = sqrt( radius );
+		return;
 	}
+
+	// old algorithm: center of bounding sphere = bounds1 = centroid of verts
+	FloatVector4	bounds1( 0.0f );
+	// p1 and p2 are searched for Ritter's algorithm
+	FloatVector4	p0( verts[0][0], verts[0][1], verts[0][2], 0.0f );
+	FloatVector4	p1( p0 );
+	float	maxDistSqr = 0.0f;
+	for ( const Vector3& v : verts ) {
+		FloatVector4	tmp( v[0], v[1], v[2], 1.0f );
+		bounds1 += tmp;
+		float	d = ( tmp - p0 ).dotProduct3( tmp - p0 );
+		if ( d > maxDistSqr ) {
+			p1 = tmp;
+			maxDistSqr = d;
+		}
+	}
+	bounds1 /= bounds1[3];
+
+	FloatVector4	bounds2;
+	if ( verts.size() < 3 ) {
+		// bounds2 = center of bounding sphere,
+		bounds2 = bounds1;
+	} else if ( !useMiniball ) {
+		// calculated with Ritter's algorithm,
+		maxDistSqr = 0.0f;
+		FloatVector4	p2( p1 );
+		for ( const Vector3& v : verts ) {
+			FloatVector4	tmp( v[0], v[1], v[2], 0.0f );
+			float	d = ( tmp - p1 ).dotProduct3( tmp - p1 );
+			if ( d > maxDistSqr ) {
+				p2 = tmp;
+				maxDistSqr = d;
+			}
+		}
+
+		bounds2 = ( p1 + p2 ) * 0.5f;
+		float	radiusSqr = maxDistSqr * 0.25f;
+		for ( const Vector3& v : verts ) {
+			FloatVector4	tmp( v[0], v[1], v[2], 0.0f );
+			float	d = ( tmp - bounds2 ).dotProduct3( tmp - bounds2 );
+			if ( d > radiusSqr ) {
+				if ( radiusSqr > 0.0f ) {
+					float	radius1 = float( std::sqrt( radiusSqr ) );
+					float	radius2 = float( std::sqrt( d ) );
+					bounds2 += ( tmp - bounds2 ) * ( ( radius2 - radius1 ) * 0.5f / radius2 );
+					radiusSqr = ( radiusSqr + d ) * 0.25f + ( radius1 * radius2 * 0.5f );
+				} else {
+					radiusSqr = d * 0.25f;
+					bounds2 = ( bounds2 + tmp ) * 0.5f;
+				}
+			}
+		}
+	} else {
+		// or Miniball
+		SEB_NAMESPACE::Smallest_enclosing_ball<float, Vector3, QVector<Vector3>>	mb( 3, verts );
+		auto	i = mb.center_begin();
+		bounds2 = FloatVector4( i[0], i[1], i[2], 0.0f );
+	}
+
+	float	rSqr1 = 0.0f;
+	float	rSqr2 = 0.0f;
+	for ( const Vector3& v : verts ) {
+		FloatVector4	tmp( v[0], v[1], v[2], 0.0f );
+		rSqr1 = std::max( rSqr1, ( tmp - bounds1 ).dotProduct3( tmp - bounds1 ) );
+		rSqr2 = std::max( rSqr2, ( tmp - bounds2 ).dotProduct3( tmp - bounds2 ) );
+	}
+	bounds1[3] = float( std::sqrt( rSqr1 ) );
+	bounds2[3] = float( std::sqrt( rSqr2 ) );
+
+	// use the result of whichever method gives a smaller radius
+	if ( bounds2[3] < bounds1[3] ) [[likely]]
+		bounds1 = bounds2;
+	center = Vector3( bounds1[0], bounds1[1], bounds1[2] );
+	radius = bounds1[3];
+}
+
+void BoundSphere::update( NifModel * nif, const QModelIndex & index )
+{
+	auto idx = index;
+	auto sph = nif->getIndex( idx, "Bounding Sphere" );
+	if ( sph.isValid() )
+		idx = sph;
+
+	nif->set<Vector3>( idx, "Center", center );
+	nif->set<float>( idx, "Radius", radius );
+}
+
+void BoundSphere::setBounds( NifModel * nif, const QModelIndex & index, const Vector3 & center, float radius )
+{
+	BoundSphere( center, radius ).update( nif, index );
 }
 
 BoundSphere & BoundSphere::operator=( const BoundSphere & o )
@@ -199,26 +286,33 @@ BoundSphere & BoundSphere::operator=( const BoundSphere & o )
 
 BoundSphere & BoundSphere::operator|=( const BoundSphere & o )
 {
-	if ( o.radius < 0 )
-		return *this;
+	FloatVector4	bounds1( center[0], center[1], center[2], radius );
+	FloatVector4	bounds2( o.center[0], o.center[1], o.center[2], o.radius );
+	if ( !( bounds1[3] >= bounds2[3] ) )
+		std::swap( bounds1, bounds2 );
 
-	if ( radius < 0 )
-		return operator=( o );
+	float	r2 = bounds2[3];
+	if ( r2 >= 0.0f ) {
+		float	r1 = bounds1[3];
 
-	float d = ( center - o.center ).length();
+		FloatVector4	a( bounds2 - bounds1 );
+		float	d = a.dotProduct3( a );
 
-	if ( radius >= d + o.radius )
-		return *this;
+		if ( d > 0.0f ) {
+			d = float( std::sqrt( d ) );
+			if ( r1 < ( d + r2 ) ) {
+				float	newRadius = ( r1 + r2 + d ) * 0.5f;
 
-	if ( o.radius >= d + radius )
-		return operator=( o );
+				bounds1 += a * ( ( newRadius - r1 ) / d );
+				bounds1[3] = newRadius;
+			}
+		}
+	}
 
-	if ( o.radius > radius )
-		radius = o.radius;
-
-	radius += d / 2;
-	center  = ( center + o.center ) / 2;
-
+	center[0] = bounds1[0];
+	center[1] = bounds1[1];
+	center[2] = bounds1[2];
+	radius = bounds1[3];
 	return *this;
 }
 
@@ -300,6 +394,71 @@ void drawAxes( const Vector3 & c, float axis, bool color )
 	glPopMatrix();
 }
 
+const float hkScale660 = 1.0 / 1.42875 * 10.0;
+const float hkScale2010 = 1.0 / 1.42875 * 100.0;
+
+float bhkScale( const NifModel * nif )
+{
+	return (nif->getBSVersion() < 47) ? hkScale660 : hkScale2010;
+}
+
+float bhkInvScale( const NifModel * nif )
+{
+	return (nif->getBSVersion() < 47) ? 1.0 / hkScale660 : 1.0 / hkScale2010;
+}
+
+float bhkScaleMult( const NifModel * nif )
+{
+	return (nif->getBSVersion() < 47) ? 1.0 : 10.0;
+}
+
+Transform bhkBodyTrans( const NifModel * nif, const QModelIndex & index )
+{
+	Transform t;
+
+	if ( nif->isNiBlock( index, "bhkRigidBodyT" ) ) {
+		t.translation = Vector3( nif->get<Vector4>( index, "Translation" ) * bhkScale( nif ) );
+		t.rotation.fromQuat( nif->get<Quat>( index, "Rotation" ) );
+	}
+
+	t.scale = bhkScale( nif );
+
+	qint32 l = nif->getBlockNumber( index );
+
+	while ( (l = nif->getParent( l )) >= 0 ) {
+		QModelIndex iAV = nif->getBlockIndex( l, "NiAVObject" );
+
+		if ( iAV.isValid() )
+			t = Transform( nif, iAV ) * t;
+	}
+
+	return t;
+}
+
+QModelIndex bhkGetEntity( const NifModel * nif, const QModelIndex & index, const QString & name )
+{
+	auto iEntity = nif->getIndex( index, name );
+	if ( !iEntity.isValid() ) {
+		iEntity = nif->getIndex( nif->getIndex( index, "Constraint Info" ), name );
+		if ( !iEntity.isValid() )
+			return {};
+	}
+
+	return iEntity;
+}
+
+QModelIndex bhkGetRBInfo( const NifModel * nif, const QModelIndex & index, const QString & name )
+{
+	auto iInfo = nif->getIndex( index, name );
+	if ( !iInfo.isValid() ) {
+		iInfo = nif->getIndex( nif->getIndex( index, "Rigid Body Info" ), name );
+		if ( !iInfo.isValid() )
+			return {};
+	}
+
+	return iInfo;
+}
+
 QVector<int> sortAxes( QVector<float> axesDots )
 {
 	QVector<float> dotsSorted = axesDots;
@@ -316,7 +475,7 @@ QVector<int> sortAxes( QVector<float> axesDots )
 		y = 1;
 	}
 
-	return{ x, y, z };
+	return{ int(x), int(y), int(z) };
 }
 
 void drawAxesOverlay( const Vector3 & c, float axis, QVector<int> axesOrder )
@@ -326,7 +485,10 @@ void drawAxesOverlay( const Vector3 & c, float axis, QVector<int> axesOrder )
 	GLfloat arrow = axis / 36.0;
 
 	glDisable( GL_LIGHTING );
-	glDepthFunc( GL_ALWAYS );
+	glDisable( GL_COLOR_MATERIAL );
+	glDisable( GL_BLEND );
+	glDisable( GL_TEXTURE_2D );
+	glDisable( GL_DEPTH_TEST );
 	glLineWidth( 2.0f );
 	glBegin( GL_LINES );
 
@@ -515,7 +677,7 @@ void drawRagdollCone( const Vector3 & pivot, const Vector3 & twist, const Vector
 
 		Vector3 xy = x * sin( f ) + y * sin( f <= PI / 2 || f >= 3 * PI / 2 ? maxPlaneAngle : -minPlaneAngle ) * cos( f );
 
-		glVertex( pivot + z * sqrt( 1 - xy.length() * xy.length() ) + xy );
+		glVertex( pivot + z * sqrt( 1 - xy.squaredLength() ) + xy );
 	}
 
 	glEnd();
@@ -530,7 +692,7 @@ void drawRagdollCone( const Vector3 & pivot, const Vector3 & twist, const Vector
 
 		Vector3 xy = x * sin( -f ) + y * sin( -f <= PI / 2 || -f >= 3 * PI / 2 ? maxPlaneAngle : -minPlaneAngle ) * cos( -f );
 
-		glVertex( pivot + z * sqrt( 1 - xy.length() * xy.length() ) + xy );
+		glVertex( pivot + z * sqrt( 1 - xy.squaredLength() ) + xy );
 	}
 
 	glEnd();
@@ -869,7 +1031,7 @@ void drawNiTSS( const NifModel * nif, const QModelIndex & iShape, bool solid )
 {
 	QModelIndex iStrips = nif->getIndex( iShape, "Strips Data" );
 	for ( int r = 0; r < nif->rowCount( iStrips ); r++ ) {
-		QModelIndex iStripData = nif->getBlock( nif->getLink( iStrips.child( r, 0 ) ), "NiTriStripsData" );
+		QModelIndex iStripData = nif->getBlockIndex( nif->getLink( QModelIndex_child( iStrips, r ) ), "NiTriStripsData" );
 		if ( iStripData.isValid() ) {
 			QVector<Vector3> verts = nif->getArray<Vector3>( iStripData, "Vertices" );
 
@@ -880,7 +1042,7 @@ void drawNiTSS( const NifModel * nif, const QModelIndex & iShape, bool solid )
 			QModelIndex iPoints = nif->getIndex( iStripData, "Points" );
 			for ( int r = 0; r < nif->rowCount( iPoints ); r++ ) {	// draw the strips like they appear in the tescs
 				// (use the unstich strips spell to avoid the spider web effect)
-				QVector<quint16> strip = nif->getArray<quint16>( iPoints.child( r, 0 ) );
+				QVector<quint16> strip = nif->getArray<quint16>( QModelIndex_child( iPoints, r ) );
 				if ( strip.count() >= 3 ) {
 					quint16 a = strip[0];
 					quint16 b = strip[1];
@@ -905,13 +1067,7 @@ void drawNiTSS( const NifModel * nif, const QModelIndex & iShape, bool solid )
 
 void drawCMS( const NifModel * nif, const QModelIndex & iShape, bool solid )
 {
-	// Scale up for Skyrim
-	float havokScale = (nif->checkVersion( 0x14020007, 0x14020007 ) && nif->getUserVersion() >= 12) ? 10.0f : 1.0f;
-
-	//QModelIndex iParent = nif->getBlock( nif->getParent( nif->getBlockNumber( iShape ) ) );
-	//Vector4 origin = Vector4( nif->get<Vector3>( iParent, "Origin" ), 0 );
-
-	QModelIndex iData = nif->getBlock( nif->getLink( iShape, "Data" ) );
+	QModelIndex iData = nif->getBlockIndex( nif->getLink( iShape, "Data" ) );
 	if ( iData.isValid() ) {
 		QModelIndex iBigVerts = nif->getIndex( iData, "Big Verts" );
 		QModelIndex iBigTris = nif->getIndex( iData, "Big Tris" );
@@ -923,15 +1079,13 @@ void drawCMS( const NifModel * nif, const QModelIndex & iShape, bool solid )
 		glDisable( GL_CULL_FACE );
 
 		for ( int r = 0; r < nif->rowCount( iBigTris ); r++ ) {
-			quint16 a = nif->get<quint16>( iBigTris.child( r, 0 ), "Triangle 1" );
-			quint16 b = nif->get<quint16>( iBigTris.child( r, 0 ), "Triangle 2" );
-			quint16 c = nif->get<quint16>( iBigTris.child( r, 0 ), "Triangle 3" );
+			Triangle tri = nif->get<Triangle>( QModelIndex_child( iBigTris, r ), "Triangle" );
 
 			glBegin( GL_TRIANGLES );
 
-			glVertex( verts[a] * havokScale );
-			glVertex( verts[b] * havokScale );
-			glVertex( verts[c] * havokScale );
+			glVertex( verts[tri.v1()] );
+			glVertex( verts[tri.v2()] );
+			glVertex( verts[tri.v3()] );
 
 			glEnd();
 		}
@@ -939,23 +1093,24 @@ void drawCMS( const NifModel * nif, const QModelIndex & iShape, bool solid )
 		glPolygonMode( GL_FRONT_AND_BACK, solid ? GL_LINE : GL_FILL );
 		glEnable( GL_CULL_FACE );
 
-		QModelIndex iChunks = nif->getIndex( iData, "Chunks" );
-		for ( int r = 0; r < nif->rowCount( iChunks ); r++ ) {
-			Vector4 chunkOrigin = nif->get<Vector4>( iChunks.child( r, 0 ), "Translation" );
+		QModelIndex iChunkArr = nif->getIndex( iData, "Chunks" );
+		for ( int r = 0; r < nif->rowCount( iChunkArr ); r++ ) {
+			auto iChunk = nif->index(r, 0, iChunkArr);
+			Vector4 chunkOrigin = nif->get<Vector4>( iChunk, "Translation" );
 
-			quint32 transformIndex = nif->get<quint32>( iChunks.child( r, 0 ), "Transform Index" );
-			QModelIndex chunkTransform = iChunkTrans.child( transformIndex, 0 );
-			Vector4 chunkTranslation = nif->get<Vector4>( chunkTransform.child( 0, 0 ) );
-			Quat chunkRotation = nif->get<Quat>( chunkTransform.child( 1, 0 ) );
+			quint32 transformIndex = nif->get<quint32>( iChunk, "Transform Index" );
+			QModelIndex chunkTransform = QModelIndex_child( iChunkTrans, transformIndex );
+			Vector4 chunkTranslation = nif->get<Vector4>( QModelIndex_child( chunkTransform ) );
+			Quat chunkRotation = nif->get<Quat>( QModelIndex_child( chunkTransform, 1 ) );
 
-			quint32 numOffsets = nif->get<quint32>( iChunks.child( r, 0 ), "Num Vertices" );
-			quint32 numIndices = nif->get<quint32>( iChunks.child( r, 0 ), "Num Indices" );
-			quint32 numStrips = nif->get<quint32>( iChunks.child( r, 0 ), "Num Strips" );
-			QVector<quint16> offsets = nif->getArray<quint16>( iChunks.child( r, 0 ), "Vertices" );
-			QVector<quint16> indices = nif->getArray<quint16>( iChunks.child( r, 0 ), "Indices" );
-			QVector<quint16> strips = nif->getArray<quint16>( iChunks.child( r, 0 ), "Strips" );
+			quint32 numOffsets = nif->get<quint32>( iChunk, "Num Vertices" ) / 3;
+			quint32 numIndices = nif->get<quint32>( iChunk, "Num Indices" );
+			quint32 numStrips = nif->get<quint32>( iChunk, "Num Strips" );
+			QVector<UshortVector3> offsets = nif->getArray<UshortVector3>( iChunk, "Vertices" );
+			QVector<quint16> indices = nif->getArray<quint16>( iChunk, "Indices" );
+			QVector<quint16> strips = nif->getArray<quint16>( iChunk, "Strips" );
 
-			QVector<Vector4> vertices( numOffsets / 3 );
+			QVector<Vector4> vertices( numOffsets );
 
 			int numStripVerts = 0;
 			int offset = 0;
@@ -964,9 +1119,8 @@ void drawCMS( const NifModel * nif, const QModelIndex & iShape, bool solid )
 				numStripVerts += strips[v];
 			}
 
-			for ( int n = 0; n < ((int)numOffsets / 3); n++ ) {
-				vertices[n] = chunkOrigin + chunkTranslation + Vector4( offsets[3 * n], offsets[3 * n + 1], offsets[3 * n + 2], 0 ) / 1000.0f;
-				vertices[n] *= havokScale;
+			for ( int n = 0; n < ((int)numOffsets); n++ ) {
+				vertices[n] = chunkOrigin + chunkTranslation + Vector4( offsets[n], 0.0f ) / 1000.0f;
 			}
 
 			glPolygonMode( GL_FRONT_AND_BACK, solid ? GL_FILL : GL_LINE );

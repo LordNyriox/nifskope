@@ -32,6 +32,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "uvedit.h"
 
+#include "gamemanager.h"
 #include "message.h"
 #include "nifskope.h"
 #include "gl/gltex.h"
@@ -64,7 +65,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 	#include <GL/glu.h>
 #endif
 
-#define BASESIZE 512.0
+#define BASESIZE 1024.0
 #define GRIDSIZE 16.0
 #define GRIDSEGS 4
 #define ZOOMUNIT -64.0
@@ -85,7 +86,7 @@ UVWidget * UVWidget::createEditor( NifModel * nif, const QModelIndex & idx )
 		return nullptr;
 	}
 
-	uvw->show();
+	uvw->showMaximized();
 	return uvw;
 }
 
@@ -111,7 +112,7 @@ QStringList UVWidget::texnames = {
 
 
 UVWidget::UVWidget( QWidget * parent )
-	: QGLWidget( QGLFormat( QGL::SampleBuffers ), parent, 0, Qt::Tool ), undoStack( new QUndoStack( this ) )
+	: QGLWidget( QGLFormat( QGL::SampleBuffers ), parent, 0, Qt::Window ), undoStack( new QUndoStack( this ) )
 {
 	setWindowTitle( tr( "UV Editor" ) );
 	setFocusPolicy( Qt::StrongFocus );
@@ -123,6 +124,8 @@ UVWidget::UVWidget( QWidget * parent )
 	pos = QPoint( 0, 0 );
 
 	mousePos = QPoint( -1000, -1000 );
+
+	game = Game::OTHER;
 
 	setCursor( QCursor( Qt::CrossCursor ) );
 	setMouseTracking( true );
@@ -224,9 +227,9 @@ void UVWidget::initializeGL()
 	qglClearColor( cfg.background );
 
 	if ( !texfile.isEmpty() )
-		bindTexture( texfile );
+		bindTexture( texfile, game );
 	else
-		bindTexture( texsource );
+		bindTexture( texsource, game );
 
 	glEnableClientState( GL_VERTEX_ARRAY );
 	glVertexPointer( 2, GL_SHORT, 0, vertArray );
@@ -280,9 +283,9 @@ void UVWidget::paintGL()
 		glDisable( GL_BLEND );
 
 	if ( !texfile.isEmpty() )
-		bindTexture( texfile );
+		bindTexture( texfile, game );
 	else
-		bindTexture( texsource );
+		bindTexture( texsource, game );
 
 	glTranslatef( -0.5f, -0.5f, 0.0f );
 
@@ -528,10 +531,10 @@ QVector<int> UVWidget::indices( const QRegion & region ) const
 	return hits.toVector();
 }
 
-bool UVWidget::bindTexture( const QString & filename )
+bool UVWidget::bindTexture( const QString & filename, const Game::GameMode game )
 {
 	GLuint mipmaps = 0;
-	mipmaps = textures->bind( filename );
+	mipmaps = textures->bind( filename, game );
 
 	if ( mipmaps ) {
 		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
@@ -550,10 +553,10 @@ bool UVWidget::bindTexture( const QString & filename )
 	return false;
 }
 
-bool UVWidget::bindTexture( const QModelIndex & iSource )
+bool UVWidget::bindTexture( const QModelIndex & iSource, const Game::GameMode game )
 {
 	GLuint mipmaps = 0;
-	mipmaps = textures->bind( iSource );
+	mipmaps = textures->bind( iSource, game );
 
 	if ( mipmaps ) {
 		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
@@ -670,7 +673,7 @@ void UVWidget::mouseMoveEvent( QMouseEvent * e )
 		}
 		break;
 
-	case Qt::MidButton:
+	case Qt::MiddleButton:
 		pos += zoom * QPointF( dPos.x(), -dPos.y() );
 		updateViewRect( width(), height() );
 
@@ -742,7 +745,7 @@ void UVWidget::wheelEvent( QWheelEvent * e )
 {
 	switch ( e->modifiers() ) {
 	case Qt::NoModifier:
-		zoom *= 1.0 + ( e->delta() / 8.0 ) / ZOOMUNIT;
+		zoom *= 1.0 + ( double( e->angleDelta().y() ) / 960.0 ) / ZOOMUNIT;
 
 		if ( zoom < MINZOOM ) {
 			zoom = MINZOOM;
@@ -800,6 +803,13 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 	iShape = nifIndex;
 	isDataOnSkin = false;
 
+	auto newTitle = tr("UV Editor");
+	if (nif)
+		newTitle += tr(" - ") + nif->getFileInfo().fileName();
+	setWindowTitle(newTitle);
+
+	game = Game::GameManager::get_game(nif->getVersionNumber(), nif->getUserVersion(), nif->getBSVersion());
+
 	// Version dependent actions
 	if ( nif && nif->getVersionNumber() != 0x14020007 ) {
 		coordSetGroup = new QActionGroup( this );
@@ -829,16 +839,16 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 
 	textures->setNifFolder( nif->getFolder() );
 
-	iShapeData = nif->getBlock( nif->getLink( iShape, "Data" ) );
-	if ( nif->getVersionNumber() == 0x14020007 && nif->getUserVersion2() >= 100 ) {
+	iShapeData = nif->getBlockIndex( nif->getLink( iShape, "Data" ) );
+	if ( nif->getVersionNumber() == 0x14020007 && nif->getBSVersion() >= 100 ) {
 		iShapeData = nif->getIndex( iShape, "Vertex Data" );
 
 		auto vf = nif->get<BSVertexDesc>( iShape, "Vertex Desc" );
-		if ( (vf & VertexFlags::VF_SKINNED) && nif->getUserVersion2() == 100 ) {
+		if ( (vf & VertexFlags::VF_SKINNED) && nif->getBSVersion() == 100 ) {
 			// Skinned SSE
 			auto skinID = nif->getLink( nif->getIndex( iShape, "Skin" ) );
-			auto partID = nif->getLink( nif->getBlock( skinID, "NiSkinInstance" ), "Skin Partition" );
-			iPartBlock = nif->getBlock( partID, "NiSkinPartition" );
+			auto partID = nif->getLink( nif->getBlockIndex( skinID, "NiSkinInstance" ), "Skin Partition" );
+			iPartBlock = nif->getBlockIndex( partID, "NiSkinPartition" );
 			if ( !iPartBlock.isValid() )
 				return false;
 
@@ -848,8 +858,8 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 		}
 	}
 
-	if ( nif->inherits( iShapeData, "NiTriBasedGeomData" ) ) {
-		iTexCoords = nif->getIndex( iShapeData, "UV Sets" ).child( 0, 0 );
+	if ( nif->blockInherits( iShapeData, "NiTriBasedGeomData" ) ) {
+		iTexCoords = QModelIndex_child( nif->getIndex( iShapeData, "UV Sets" ) );
 
 		if ( !iTexCoords.isValid() || !nif->rowCount( iTexCoords ) ) {
 			return false;
@@ -858,7 +868,7 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 		if ( !setTexCoords() ) {
 			return false;
 		}
-	} else if ( nif->inherits( iShape, "BSTriShape" ) ) {
+	} else if ( nif->blockInherits( iShape, "BSTriShape" ) ) {
 		int numVerts = 0;
 		if ( !isDataOnSkin )
 			numVerts = nif->get<int>( iShape, "Num Vertices" );
@@ -880,18 +890,18 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 	props << nif->getLink( iShape, "Shader Property" );
 	for ( const auto l : props )
 	{
-		QModelIndex iTexProp = nif->getBlock( l, "NiTexturingProperty" );
+		QModelIndex iTexProp = nif->getBlockIndex( l, "NiTexturingProperty" );
 
 		if ( iTexProp.isValid() ) {
 			while ( currentTexSlot < texnames.size() ) {
 				iTex = nif->getIndex( iTexProp, texnames[currentTexSlot] );
 
 				if ( iTex.isValid() ) {
-					QModelIndex iTexSource = nif->getBlock( nif->getLink( iTex, "Source" ) );
+					QModelIndex iTexSource = nif->getBlockIndex( nif->getLink( iTex, "Source" ) );
 
 					if ( iTexSource.isValid() ) {
 						currentCoordSet = nif->get<int>( iTex, "UV Set" );
-						iTexCoords = nif->getIndex( iShapeData, "UV Sets" ).child( currentCoordSet, 0 );
+						iTexCoords = QModelIndex_child( nif->getIndex( iShapeData, "UV Sets" ), currentCoordSet );
 						texsource  = iTexSource;
 
 						if ( setTexCoords() )
@@ -902,25 +912,25 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 				}
 			}
 		} else {
-			iTexProp = nif->getBlock( l, "NiTextureProperty" );
+			iTexProp = nif->getBlockIndex( l, "NiTextureProperty" );
 
 			if ( iTexProp.isValid() ) {
-				QModelIndex iTexSource = nif->getBlock( nif->getLink( iTexProp, "Image" ) );
+				QModelIndex iTexSource = nif->getBlockIndex( nif->getLink( iTexProp, "Image" ) );
 
 				if ( iTexSource.isValid() ) {
-					//texfile = TexCache::find( nif->get<QString>( iTexSource, "File Name" ) , nif->getFolder() );
+					//texfile = TexCache::find( nif->get<QString>( iTexSource, "File Name" ) );
 					texsource = iTexSource;
 					return true;
 				}
 			} else {
 				// TODO: use the BSShaderTextureSet
-				iTexProp = nif->getBlock( l, "BSShaderPPLightingProperty" );
+				iTexProp = nif->getBlockIndex( l, "BSShaderPPLightingProperty" );
 
 				if ( !iTexProp.isValid() )
-					iTexProp = nif->getBlock( l, "BSLightingShaderProperty" );
+					iTexProp = nif->getBlockIndex( l, "BSLightingShaderProperty" );
 
 				if ( iTexProp.isValid() ) {
-					QModelIndex iTexSource = nif->getBlock( nif->getLink( iTexProp, "Texture Set" ) );
+					QModelIndex iTexSource = nif->getBlockIndex( nif->getLink( iTexProp, "Texture Set" ) );
 
 					if ( iTexSource.isValid() ) {
 						// Assume that a FO3 mesh never has embedded textures...
@@ -929,18 +939,18 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 						QModelIndex iTextures = nif->getIndex( iTexSource, "Textures" );
 
 						if ( iTextures.isValid() ) {
-							texfile = TexCache::find( nif->get<QString>( iTextures.child( 0, 0 ) ), nif->getFolder() );
+							texfile = TexCache::find( nif->get<QString>( QModelIndex_child( iTextures ) ), game );
 							return true;
 						}
 					}
 				} else {
-					iTexProp = nif->getBlock( l, "BSEffectShaderProperty" );
+					iTexProp = nif->getBlockIndex( l, "BSEffectShaderProperty" );
 
 					if ( iTexProp.isValid() ) {
 						QString texture = nif->get<QString>( iTexProp, "Source Texture" );
 
 						if ( !texture.isEmpty() ) {
-							texfile = TexCache::find( texture, nif->getFolder() );
+							texfile = TexCache::find( texture, game );
 							return true;
 						}
 					}
@@ -954,7 +964,7 @@ bool UVWidget::setNifData( NifModel * nifModel, const QModelIndex & nifIndex )
 
 bool UVWidget::setTexCoords()
 {
-	if ( nif->inherits( iShape, "NiTriBasedGeom" ) )
+	if ( nif->blockInherits( iShape, "NiTriBasedGeom" ) )
 		texcoords = nif->getArray<Vector2>( iTexCoords );
 
 	QVector<Triangle> tris;
@@ -968,18 +978,18 @@ bool UVWidget::setTexCoords()
 			return false;
 
 		for ( int r = 0; r < nif->rowCount( iPoints ); r++ ) {
-			tris += triangulate( nif->getArray<quint16>( iPoints.child( r, 0 ) ) );
+			tris += triangulate( nif->getArray<quint16>( QModelIndex_child( iPoints, r ) ) );
 		}
-	} else if ( nif->inherits( iShape, "BSTriShape" ) ) {
+	} else if ( nif->blockInherits( iShape, "BSTriShape" ) ) {
 		if ( !isDataOnSkin ) {
 			tris = nif->getArray<Triangle>( iShape, "Triangles" );
 		} else {
-			auto partIdx = nif->getIndex( iPartBlock, "Partition" );
+			auto partIdx = nif->getIndex( iPartBlock, "Partitions" );
 			for ( int i = 0; i < nif->rowCount( partIdx ); i++ ) {
 				tris << nif->getArray<Triangle>( nif->index( i, 0, partIdx ), "Triangles" );
 			}
 		}
-		
+
 	}
 
 	if ( tris.isEmpty() )
@@ -994,7 +1004,7 @@ bool UVWidget::setTexCoords()
 		faces.append( face( fIdx, t[0], t[1], t[2] ) );
 
 		for ( int i = 0; i < 3; i++ ) {
-			texcoords2faces.insertMulti( t[i], fIdx );
+			texcoords2faces.insert( t[i], fIdx );
 		}
 	}
 
@@ -1007,9 +1017,9 @@ void UVWidget::updateNif()
 		disconnect( nif, &NifModel::dataChanged, this, &UVWidget::nifDataChanged );
 		nif->setState( BaseModel::Processing );
 
-		if ( nif->inherits( iShapeData, "NiTriBasedGeomData" ) ) {
+		if ( nif->blockInherits( iShapeData, "NiTriBasedGeomData" ) ) {
 			nif->setArray<Vector2>( iTexCoords, texcoords );
-		} else if ( nif->inherits( iShape, "BSTriShape" ) ) {
+		} else if ( nif->blockInherits( iShape, "BSTriShape" ) ) {
 			int numVerts = 0;
 			if ( !isDataOnSkin )
 				numVerts = nif->get<int>( iShape, "Num Vertices" );
@@ -1022,7 +1032,7 @@ void UVWidget::updateNif()
 
 			nif->dataChanged( iShape, iShape );
 		}
-		
+
 		nif->restoreState();
 		connect( nif, &NifModel::dataChanged, this, &UVWidget::nifDataChanged );
 	}
@@ -1035,7 +1045,7 @@ void UVWidget::nifDataChanged( const QModelIndex & idx )
 		return;
 	}
 
-	if ( nif->getBlock( idx ) == iShapeData ) {
+	if ( nif->getBlockIndex( idx ) == iShapeData ) {
 		//if ( ! setNifData( nif, iShape ) )
 		{
 			close();
@@ -1444,7 +1454,7 @@ public:
 		}
 
 		Matrix rotMatrix;
-		rotMatrix.fromEuler( 0, 0, ( rotation * PI / 180.0 ) );
+		rotMatrix.fromEuler( 0, 0, deg2rad(rotation) );
 
 		for ( const auto i : uvw->selection ) {
 			Vector3 temp( uvw->texcoords[i], 0 );
@@ -1473,7 +1483,7 @@ public:
 		}
 
 		Matrix rotMatrix;
-		rotMatrix.fromEuler( 0, 0, -( rotation * PI / 180.0 ) );
+		rotMatrix.fromEuler( 0, 0, -deg2rad(rotation) );
 
 		for ( const auto i : uvw->selection ) {
 			Vector3 temp( uvw->texcoords[i], 0 );
@@ -1513,7 +1523,7 @@ void UVWidget::getTexSlots()
 	props << nif->getLink( iShape, "Shader Property" );
 	for ( const auto l : props )
 	{
-		QModelIndex iTexProp = nif->getBlock( l, "NiTexturingProperty" );
+		QModelIndex iTexProp = nif->getBlockIndex( l, "NiTexturingProperty" );
 
 		if ( iTexProp.isValid() ) {
 			for ( const QString& name : texnames ) {
@@ -1544,17 +1554,17 @@ void UVWidget::selectTexSlot()
 	props << nif->getLink( iShape, "Shader Property" );
 	for ( const auto l : props )
 	{
-		QModelIndex iTexProp = nif->getBlock( l, "NiTexturingProperty" );
+		QModelIndex iTexProp = nif->getBlockIndex( l, "NiTexturingProperty" );
 
 		if ( iTexProp.isValid() ) {
 			iTex = nif->getIndex( iTexProp, texnames[currentTexSlot] );
 
 			if ( iTex.isValid() ) {
-				QModelIndex iTexSource = nif->getBlock( nif->getLink( iTex, "Source" ) );
+				QModelIndex iTexSource = nif->getBlockIndex( nif->getLink( iTex, "Source" ) );
 
 				if ( iTexSource.isValid() ) {
 					currentCoordSet = nif->get<int>( iTex, "UV Set" );
-					iTexCoords = nif->getIndex( iShapeData, "UV Sets" ).child( currentCoordSet, 0 );
+					iTexCoords = QModelIndex_child( nif->getIndex( iShapeData, "UV Sets" ), currentCoordSet );
 					texsource  = iTexSource;
 					setTexCoords();
 					updateGL();
@@ -1569,8 +1579,8 @@ void UVWidget::getCoordSets()
 {
 	coordSetSelect->clear();
 
-	// TODO: Broken for newer nif.xml where NiGeometryData has been corrected
-	quint8 numUvSets = nif->get<quint8>( iShapeData, "Num UV Sets" );
+	quint8 numUvSets = (nif->get<quint16>( iShapeData, "Data Flags" ) & 0x3F)
+					 | (nif->get<quint16>( iShapeData, "BS Data Flags" ) & 0x1);
 
 	for ( int i = 0; i < numUvSets; i++ ) {
 		QAction * temp;
@@ -1610,7 +1620,7 @@ void UVWidget::changeCoordSet( int setToUse )
 	currentCoordSet = setToUse;
 	nif->set<quint8>( iTex, "UV Set", currentCoordSet );
 	// read new coordinate set
-	iTexCoords = nif->getIndex( iShapeData, "UV Sets" ).child( currentCoordSet, 0 );
+	iTexCoords = QModelIndex_child( nif->getIndex( iShapeData, "UV Sets" ), currentCoordSet );
 	setTexCoords();
 }
 
@@ -1620,11 +1630,15 @@ void UVWidget::duplicateCoordSet()
 	// this signal close the UVWidget
 	disconnect( nif, &NifModel::dataChanged, this, &UVWidget::nifDataChanged );
 	// expand the UV Sets array and duplicate the current coordinates
-	quint8 numUvSets = nif->get<quint8>( iShapeData, "Num UV Sets" );
-	nif->set<quint8>( iShapeData, "Num UV Sets", numUvSets + 1 );
+	auto dataFlags = nif->get<quint16>( iShapeData, "Data Flags" );
+	quint8 numUvSets = nif->get<quint16>( iShapeData, "Data Flags" ) & 0x3F;
+	numUvSets += 1;
+	dataFlags = dataFlags | ((dataFlags & 0x3F) | numUvSets);
+
+	nif->set<quint8>( iShapeData, "Data Flags", numUvSets );
 	QModelIndex uvSets = nif->getIndex( iShapeData, "UV Sets" );
-	nif->updateArray( uvSets );
-	nif->setArray<Vector2>( uvSets.child( numUvSets, 0 ), nif->getArray<Vector2>( uvSets.child( currentCoordSet, 0 ) ) );
+	nif->updateArraySize( uvSets );
+	nif->setArray<Vector2>( QModelIndex_child( uvSets, numUvSets ), nif->getArray<Vector2>( QModelIndex_child( uvSets, currentCoordSet ) ) );
 	// switch to that coordinate set
 	changeCoordSet( numUvSets );
 	// reconnect data changed signal

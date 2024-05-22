@@ -12,6 +12,7 @@
 #include <QRegularExpression>
 #include <QStringListModel>
 
+#include "gamemanager.h"
 
 // Brief description is deliberately not autolinked to class Spell
 /*! \file stringpalette.cpp
@@ -73,6 +74,7 @@ class spEditStringOffset final : public Spell
 public:
 	QString name() const override final { return Spell::tr( "Edit String Offset" ); }
 	QString page() const override final { return Spell::tr( "" ); }
+	bool constant() const override final { return true; }
 	QIcon icon() const override final
 	{
 		if ( !txt_xpm_icon )
@@ -135,7 +137,7 @@ public:
 	//! Gets the string palette referred to by this string offset
 	static QModelIndex getStringPalette( const NifModel * nif, const QModelIndex & index )
 	{
-		QModelIndex iPalette = nif->getBlock( nif->getLink( index.parent(), "String Palette" ) );
+		QModelIndex iPalette = nif->getBlockIndex( nif->getLink( index.parent(), "String Palette" ) );
 
 		if ( iPalette.isValid() )
 			return iPalette;
@@ -294,8 +296,8 @@ public:
 
 	bool isApplicable( const NifModel * nif, const QModelIndex & index ) override final
 	{
-		return nif->inherits( index, "NiSequence" )
-		       && nif->getBlock( nif->getLink( index, "String Palette" ) ).isValid()
+		return nif->blockInherits( index, "NiSequence" )
+		       && nif->getBlockIndex( nif->getLink( index, "String Palette" ) ).isValid()
 		       && nif->checkVersion( 0x0A020000, 0x14000005 );
 	}
 
@@ -304,11 +306,11 @@ public:
 		// string offset is used in ControllerLink which exists in NiSequence
 		// a single palette could be share by multiple NiSequences
 
-		QPersistentModelIndex iPalette = nif->getBlock( nif->getLink( index, "String Palette" ) );
+		QPersistentModelIndex iPalette = nif->getBlockIndex( nif->getLink( index, "String Palette" ) );
 		qDebug() << "This block uses " << iPalette;
 
 		if ( !iPalette.isValid() ) {
-			iPalette = nif->getBlock( nif->getLink( index.parent(), "String Palette" ) );
+			iPalette = nif->getBlockIndex( nif->getLink( index.parent(), "String Palette" ) );
 
 			if ( !iPalette.isValid() ) {
 				qCWarning( nsSpell ) << Spell::tr( "Cannot find string palette" );
@@ -350,7 +352,6 @@ public:
 
 		// rebuild palette
 		bytes.clear();
-		x = 0;
 
 		QMap<int, int> offsetMap;
 
@@ -361,10 +362,9 @@ public:
 				// set references to empty
 				offsetMap.insert( oldOffsets[i], -1 );
 			} else {
-				offsetMap.insert( oldOffsets[i], x );
-				bytes += s;
+				offsetMap.insert( oldOffsets[i], int(bytes.size()) );
+				bytes += s.toUtf8();
 				bytes.append( '\0' );
-				x += ( s.length() + 1 );
 			}
 		}
 
@@ -372,7 +372,7 @@ public:
 		QList<QPersistentModelIndex> sequenceList;
 
 		for ( int i = 0; i < nif->getBlockCount(); i++ ) {
-			QPersistentModelIndex current = nif->getBlock( i, "NiSequence" );
+			QPersistentModelIndex current = nif->getBlockIndex( i, "NiSequence" );
 
 			if ( current.isValid() ) {
 				sequenceList.append( current );
@@ -387,7 +387,7 @@ public:
 
 		while ( sequenceListIterator.hasNext() ) {
 			QPersistentModelIndex temp = sequenceListIterator.next();
-			QPersistentModelIndex tempPalette = nif->getBlock( nif->getLink( temp, "String Palette" ) );
+			QPersistentModelIndex tempPalette = nif->getBlockIndex( nif->getLink( temp, "String Palette" ) );
 
 			//qDebug() << "Sequence " << temp << " uses " << tempPalette;
 			if ( iPalette == tempPalette ) {
@@ -407,23 +407,23 @@ public:
 			QPersistentModelIndex blocks = nif->getIndex( nextBlock, "Controlled Blocks" );
 
 			for ( int i = 0; i < nif->rowCount( blocks ); i++ ) {
-				QPersistentModelIndex thisBlock = blocks.child( i, 0 );
+				QPersistentModelIndex thisBlock = QModelIndex_child( blocks, i );
 
 				for ( int j = 0; j < nif->rowCount( thisBlock ); j++ ) {
-					if ( nif->getValue( thisBlock.child( j, 0 ) ).type() == NifValue::tStringOffset ) {
+					if ( nif->getValue( QModelIndex_child( thisBlock, j ) ).type() == NifValue::tStringOffset ) {
 						// we shouldn't ever exceed the limit of an int, even though the type
 						// is properly a uint
-						int oldValue = nif->get<int>( thisBlock.child( j, 0 ) );
-						qDebug() << "Index " << thisBlock.child( j, 0 )
+						int oldValue = nif->get<int>( QModelIndex_child( thisBlock, j ) );
+						qDebug() << "Index " << QModelIndex_child( thisBlock, j )
 						           << " is a string offset with name "
-						           << nif->itemName( thisBlock.child( j, 0 ) )
+						           << nif->itemName( QModelIndex_child( thisBlock, j ) )
 						           << " and value "
-						           << nif->get<int>( thisBlock.child( j, 0 ) );
+						           << nif->get<int>( QModelIndex_child( thisBlock, j ) );
 
 
 						if ( oldValue != -1 ) {
 							int newValue = offsetMap.value( oldValue );
-							nif->set<int>( thisBlock.child( j, 0 ), newValue );
+							nif->set<int>( QModelIndex_child( thisBlock, j ), newValue );
 							numRefsUpdated++;
 						}
 					}
@@ -464,7 +464,7 @@ public:
 		QList<QModelIndex> sequenceList;
 
 		for ( int i = 0; i < nif->getBlockCount(); i++ ) {
-			QModelIndex current = nif->getBlock( i, "NiSequence" );
+			QModelIndex current = nif->getBlockIndex( i, "NiSequence" );
 
 			if ( current.isValid() ) {
 				sequenceList.append( current );

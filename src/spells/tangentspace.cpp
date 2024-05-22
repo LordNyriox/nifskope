@@ -1,13 +1,14 @@
 #include "tangentspace.h"
+#include "gamemanager.h"
 
 #include "lib/nvtristripwrapper.h"
 
 
 bool spTangentSpace::isApplicable( const NifModel * nif, const QModelIndex & index )
 {
-	QModelIndex iData = nif->getBlock( nif->getLink( index, "Data" ) );
+	QModelIndex iData = nif->getBlockIndex( nif->getLink( index, "Data" ) );
 
-	if ( nif->isNiBlock( index, "BSTriShape" ) || nif->isNiBlock( index, "BSSubIndexTriShape" ) 
+	if ( nif->isNiBlock( index, "BSTriShape" ) || nif->isNiBlock( index, "BSSubIndexTriShape" )
 		|| nif->isNiBlock( index, "BSMeshLODTriShape" ) ) {
 		// TODO: Check vertex flags to verify mesh has normals and space for tangents/bitangents
 		return true;
@@ -43,15 +44,15 @@ QModelIndex spTangentSpace::cast( NifModel * nif, const QModelIndex & iBlock )
 	QPersistentModelIndex iShape = iBlock;
 	QModelIndex iData;
 	QModelIndex iPartBlock;
-	if ( nif->getUserVersion2() < 100 ) {
-		iData = nif->getBlock( nif->getLink( iShape, "Data" ) );
+	if ( nif->getBSVersion() < 100 ) {
+		iData = nif->getBlockIndex( nif->getLink( iShape, "Data" ) );
 	} else {
 		auto vf = nif->get<BSVertexDesc>( iShape, "Vertex Desc" );
-		if ( (vf & VertexFlags::VF_SKINNED) && nif->getUserVersion2() == 100 ) {
+		if ( (vf & VertexFlags::VF_SKINNED) && nif->getBSVersion() == 100 ) {
 			// Skinned SSE
 			auto skinID = nif->getLink( nif->getIndex( iShape, "Skin" ) );
-			auto partID = nif->getLink( nif->getBlock( skinID, "NiSkinInstance" ), "Skin Partition" );
-			iPartBlock = nif->getBlock( partID, "NiSkinPartition" );
+			auto partID = nif->getLink( nif->getBlockIndex( skinID, "NiSkinInstance" ), "Skin Partition" );
+			iPartBlock = nif->getBlockIndex( partID, "NiSkinPartition" );
 			if ( iPartBlock.isValid() )
 				iData = nif->getIndex( iPartBlock, "Vertex Data" );
 		} else {
@@ -63,7 +64,7 @@ QModelIndex spTangentSpace::cast( NifModel * nif, const QModelIndex & iBlock )
 	QVector<Vector3> norms;
 	QVector<Vector2> texco;
 
-	if ( nif->getUserVersion2() < 100 ) {
+	if ( nif->getBSVersion() < 100 ) {
 		verts = nif->getArray<Vector3>( iData, "Vertices" );
 		norms = nif->getArray<Vector3>( iData, "Normals" );
 	} else {
@@ -87,16 +88,10 @@ QModelIndex spTangentSpace::cast( NifModel * nif, const QModelIndex & iBlock )
 	}
 
 	QVector<Color4> vxcol = nif->getArray<Color4>( iData, "Vertex Colors" );
-	int numUVSets = nif->get<int>( iData, "Num UV Sets" );
-	int tspaceFlags = nif->get<int>( iData, "TSpace Flag" );
 
-	if ( nif->getUserVersion2() < 100 ) {
+	if ( nif->getBSVersion() < 100 ) {
 		QModelIndex iTexCo = nif->getIndex( iData, "UV Sets" );
-
-		if ( !iTexCo.isValid() )
-			iTexCo = nif->getIndex( iData, "UV Sets 2" );
-
-		iTexCo = iTexCo.child( 0, 0 );
+		iTexCo = QModelIndex_child( iTexCo );
 		texco = nif->getArray<Vector2>( iTexCo );
 	}
 
@@ -108,18 +103,18 @@ QModelIndex spTangentSpace::cast( NifModel * nif, const QModelIndex & iBlock )
 		QVector<QVector<quint16> > strips;
 
 		for ( int r = 0; r < nif->rowCount( iPoints ); r++ )
-			strips.append( nif->getArray<quint16>( iPoints.child( r, 0 ) ) );
+			strips.append( nif->getArray<quint16>( QModelIndex_child( iPoints, r ) ) );
 
 		triangles = triangulate( strips );
-	} else if ( nif->getUserVersion2() < 100 ) {
+	} else if ( nif->getBSVersion() < 100 ) {
 		triangles = nif->getArray<Triangle>( iData, "Triangles" );
-	} else if ( nif->getUserVersion2() >= 100 ) {
+	} else if ( nif->getBSVersion() >= 100 ) {
 		if ( iPartBlock.isValid() ) {
 			// Get triangles from all partitions
-			auto numParts = nif->get<int>( iPartBlock, "Num Skin Partition Blocks" );
-			auto iParts = nif->getIndex( iPartBlock, "Partition" );
+			auto numParts = nif->get<int>( iPartBlock, "Num Partitions" );
+			auto iParts = nif->getIndex( iPartBlock, "Partitions" );
 			for ( int i = 0; i < numParts; i++ )
-				triangles << nif->getArray<Triangle>( iParts.child( i, 0 ), "Triangles" );
+				triangles << nif->getArray<Triangle>( QModelIndex_child( iParts, i ), "Triangles" );
 		} else {
 			triangles = nif->getArray<Triangle>( iShape, "Triangles" );
 		}
@@ -253,7 +248,7 @@ QModelIndex spTangentSpace::cast( NifModel * nif, const QModelIndex & iBlock )
 	if ( isOblivion ) {
 		QModelIndex iTSpace;
 		for ( const auto link : nif->getChildLinks( nif->getBlockNumber( iShape ) ) ) {
-			iTSpace = nif->getBlock( link, "NiBinaryExtraData" );
+			iTSpace = nif->getBlockIndex( link, "NiBinaryExtraData" );
 
 			if ( iTSpace.isValid() && nif->get<QString>( iTSpace, "Name" ) == "Tangent space (binormal & tangent vectors)" )
 				break;
@@ -270,25 +265,20 @@ QModelIndex spTangentSpace::cast( NifModel * nif, const QModelIndex & iBlock )
 			if ( iNumExtras.isValid() && iExtras.isValid() ) {
 				int numlinks = nif->get<int>( iNumExtras );
 				nif->set<int>( iNumExtras, numlinks + 1 );
-				nif->updateArray( iExtras );
-				nif->setLink( iExtras.child( numlinks, 0 ), nif->getBlockNumber( iTSpace ) );
+				nif->updateArraySize( iExtras );
+				nif->setLink( QModelIndex_child( iExtras, numlinks ), nif->getBlockNumber( iTSpace ) );
 			}
 		}
 
 		nif->set<QByteArray>( iTSpace, "Binary Data", QByteArray( (const char *)tan.data(), tan.count() * sizeof( Vector3 ) ) + QByteArray( (const char *)bin.data(), bin.count() * sizeof( Vector3 ) ) );
-	} else if ( nif->getUserVersion2() < 100 ) {
-		if ( tspaceFlags == 0 )
-			tspaceFlags = 0x10;
-
-		nif->set<int>( iShape, "TSpace Flag", tspaceFlags );
-		nif->set<int>( iShape, "Num UV Sets", numUVSets );
+	} else if ( nif->getBSVersion() < 100 ) {
 		QModelIndex iBinorms  = nif->getIndex( iData, "Bitangents" );
 		QModelIndex iTangents = nif->getIndex( iData, "Tangents" );
-		nif->updateArray( iBinorms );
-		nif->updateArray( iTangents );
+		nif->updateArraySize( iBinorms );
+		nif->updateArraySize( iTangents );
 		nif->setArray( iBinorms, bin );
 		nif->setArray( iTangents, tan );
-	} else if ( nif->getUserVersion2() >= 100 ) {
+	} else if ( nif->getBSVersion() >= 100 ) {
 		int numVerts;
 		// "Num Vertices" does not exist in the partition
 		if ( iPartBlock.isValid() )
@@ -301,13 +291,9 @@ QModelIndex spTangentSpace::cast( NifModel * nif, const QModelIndex & iBlock )
 			auto idx = nif->index( i, 0, iData );
 
 			nif->set<ByteVector3>( idx, "Tangent", tan[i] );
-			nif->set<float>( idx, "Bitangent X", bin[i][0] );
-
-			auto bitYi = round( ((bin[i][1] + 1.0) / 2.0) * 255.0 );
-			auto bitZi = round( ((bin[i][2] + 1.0) / 2.0) * 255.0 );
-			
-			nif->set<quint8>( idx, "Bitangent Y", bitYi );
-			nif->set<quint8>( idx, "Bitangent Z", bitZi );
+			nif->set<float>(idx, "Bitangent X", bin[i][0]);
+			nif->set<float>(idx, "Bitangent Y", bin[i][1]);
+			nif->set<float>(idx, "Bitangent Z", bin[i][2]);
 		}
 		nif->restoreState();
 	}
@@ -346,13 +332,13 @@ public:
 		spTangentSpace TSpacer;
 
 		for ( int n = 0; n < nif->getBlockCount(); n++ ) {
-			QModelIndex idx = nif->getBlock( n );
+			QModelIndex idx = nif->getBlockIndex( n );
 
 			if ( TSpacer.isApplicable( nif, idx ) )
 				indices << idx;
 		}
 
-		for ( const QModelIndex& idx : indices ) {
+		for ( const QPersistentModelIndex& idx : indices ) {
 			TSpacer.castIfApplicable( nif, idx );
 		}
 
@@ -378,23 +364,23 @@ public:
 	{
 		QVector<QModelIndex> blks;
 		for ( int l = 0; l < nif->getBlockCount(); l++ ) {
-			QModelIndex idx = nif->getBlock( l, "NiTriShape" );
+			QModelIndex idx = nif->getBlockIndex( l, "NiTriShape" );
 			if ( !idx.isValid() )
 				continue;
 
 			// NiTriShapeData
-			auto iData = nif->getBlock( nif->getLink( idx, "Data" ) );
+			auto iData = nif->getBlockIndex( nif->getLink( idx, "Data" ) );
 
 			// Do not do anything without proper UV/Vert/Tri data
 			auto numVerts = nif->get<int>( iData, "Num Vertices" );
 			auto numTris = nif->get<int>( iData, "Num Triangles" );
-			bool hasUVs = nif->get<int>( iData, "Vector Flags" ) & 1;
+			bool hasUVs = nif->get<int>( iData, "Data Flags" ) & 1;
 			if ( !hasUVs || !numVerts || !numTris )
 				continue;
 
-			nif->set<int>( iData, "Vector Flags", 4097 );
-			nif->updateArray( iData, "Tangents" );
-			nif->updateArray( iData, "Bitangents" );
+			nif->set<int>( iData, "Data Flags", 4097 );
+			nif->updateArraySize( iData, "Tangents" );
+			nif->updateArraySize( iData, "Bitangents" );
 
 			// Add NiTriShape for spTangentSpace
 			blks << idx;

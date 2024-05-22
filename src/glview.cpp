@@ -35,11 +35,14 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "message.h"
 #include "nifskope.h"
 #include "gl/renderer.h"
-#include "gl/glmesh.h"
+#include "gl/glshape.h"
 #include "gl/gltex.h"
 #include "model/nifmodel.h"
 #include "ui/settingsdialog.h"
 #include "ui/widgets/fileselect.h"
+#include "gamemanager.h"
+#include "libfo76utils/src/fp32vec4.hpp"
+#include "ui/widgets/filebrowser.h"
 
 #include <QApplication>
 #include <QActionGroup>
@@ -51,8 +54,8 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <QDir>
 #include <QGroupBox>
 #include <QImageWriter>
-#include <QLabel>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -80,17 +83,17 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // NOTE: The FPS define is a frame limiter,
 //	NOT the guaranteed FPS in the viewport.
-//	Also the QTimer is integer milliseconds 
+//	Also the QTimer is integer milliseconds
 //	so 60 will give you 1000/60 = 16, not 16.666
 //	therefore it's really 62.5FPS
 #define FPS 144
 
 #define ZOOM_MIN 1.0
 #define ZOOM_MAX 1000.0
+#define ZOOM_PAGE_KEY_MULT 1.025
 
-#ifndef M_PI
-#define M_PI 3.1415926535897932385
-#endif
+#define ZOOM_QE_KEY_MULT 1.025
+#define ZOOM_MOUSE_WHEEL_MULT 0.95
 
 
 //! @file glview.cpp GLView implementation
@@ -101,7 +104,7 @@ GLGraphicsView::GLGraphicsView( QWidget * parent ) : QGraphicsView()
 	setContextMenuPolicy( Qt::CustomContextMenu );
 	setFocusPolicy( Qt::ClickFocus );
 	setAcceptDrops( true );
-	
+
 	installEventFilter( parent );
 }
 
@@ -121,24 +124,30 @@ GLView * GLView::create( NifSkope * window )
 
 	QSettings settings;
 	int aa = settings.value( "Settings/Render/General/Antialiasing", 4 ).toInt();
+#ifdef Q_OS_LINUX
+	// work around issues with MSAA > 4x on Linux
+	aa = std::min< int >( std::max< int >( aa, 0 ), 2 );
+#else
+	aa = std::min< int >( std::max< int >( aa, 0 ), 4 );
+#endif
 
 	// All new windows after the first window will share a format
 	if ( share ) {
 		fmt = share->format();
 	} else {
-		fmt.setSampleBuffers( aa > 0 );
+		fmt.setSampleBuffers( bool(aa) );
 	}
-	
+
 	// OpenGL version
-	fmt.setVersion( 2, 1 );
+	fmt.setVersion( 4, 0 );
 	// Ignored if version < 3.2
-	//fmt.setProfile(QGLFormat::CoreProfile);
+	fmt.setProfile( QGLFormat::CompatibilityProfile );
 
 	// V-Sync
 	fmt.setSwapInterval( 1 );
 	fmt.setDoubleBuffer( true );
 
-	fmt.setSamples( std::pow( aa, 2 ) );
+	fmt.setSamples( 1 << aa );
 
 	fmt.setDirectRendering( true );
 	fmt.setRgba( true );
@@ -166,6 +175,8 @@ GLView::GLView( const QGLFormat & format, QWidget * p, const QGLWidget * shareWi
 
 	// Make the context current on this window
 	makeCurrent();
+	if ( !isValid() )
+		return;
 
 	// Create an OpenGL context
 	glContext = context()->contextHandle();
@@ -213,11 +224,15 @@ GLView::GLView( const QGLFormat & format, QWidget * p, const QGLWidget * shareWi
 	connect( lightVisTimer, &QTimer::timeout, [this]() { setVisMode( Scene::VisLightPos, false ); update(); } );
 
 	connect( NifSkope::getOptions(), &SettingsDialog::flush3D, textures, &TexCache::flush );
-	connect( NifSkope::getOptions(), &SettingsDialog::update3D, [this]() {
-		updateSettings();
-		qglClearColor( cfg.background );
-		update();
-	} );
+
+	connect(NifSkope::getOptions(), &SettingsDialog::update3D, this, static_cast<void (GLView::*)()>(&GLView::updateSettings));
+	connect(NifSkope::getOptions(), &SettingsDialog::update3D, [this]() {
+		// Calling update() here in a lambda can crash..
+		//updateSettings();
+		qglClearColor(clearColor());
+		//update();
+	});
+	connect(NifSkope::getOptions(), &SettingsDialog::update3D, this, static_cast<void (GLView::*)()>(&GLView::update));
 }
 
 GLView::~GLView()
@@ -242,13 +257,70 @@ void GLView::updateSettings()
 	settings.endGroup();
 }
 
+static bool envMapFileListFilterFunction( void * p, const std::string_view & s )
+{
+	(void) p;
+	if ( !s.starts_with("textures/") )
+		return false;
+	if ( !(s.ends_with(".dds") || s.ends_with(".hdr")) )
+		return false;
+	return ( s.find("/cubemaps/") != std::string_view::npos );
+}
+
+void GLView::selectPBRCubeMap( quint32 bsVersion )
+{
+	if ( !bsVersion ) {
+		if ( !model )
+			return;
+		bsVersion = model->getBSVersion();
+	}
+	if ( bsVersion < 151 )
+		return;
+	bool	isStarfield = ( bsVersion >= 170 );
+	QString	cfgPath( !isStarfield ? "Settings/Render/General/Cube Map Path FO 76" : "Settings/Render/General/Cube Map Path STF" );
+
+	std::set< std::string_view >	fileSet;
+	Game::GameManager::list_files( fileSet, (!isStarfield ? Game::FALLOUT_76 : Game::STARFIELD), &envMapFileListFilterFunction );
+	QSettings	settings;
+	std::string	prvPath( settings.value( cfgPath ).toString().toStdString() );
+	if ( !prvPath.empty() && fileSet.find( prvPath ) == fileSet.end() )
+		prvPath.clear();
+
+	FileBrowserWidget	fileBrowser( 640, 480, "Select Default Environment Map", fileSet, prvPath );
+	const std::string_view *	newPath = nullptr;
+	if ( fileBrowser.exec() == QDialog::Accepted )
+		newPath = fileBrowser.getItemSelected();
+	if ( !newPath || newPath->empty() )
+		return;
+
+	if ( NifSkope::getOptions() )
+		NifSkope::getOptions()->apply();
+	settings.setValue( cfgPath, QString::fromLatin1( newPath->data(), qsizetype(newPath->length()) ) );
+	if ( NifSkope::getOptions() )
+		emit NifSkope::getOptions()->loadSettings();
+	if ( scene && scene->renderer ) {
+		scene->renderer->updateSettings();
+		updateScene();
+	}
+}
+
+void GLView::selectF76CubeMap()
+{
+	selectPBRCubeMap( 155 );
+}
+
+void GLView::selectSTFCubeMap()
+{
+	selectPBRCubeMap( 172 );
+}
+
 QColor GLView::clearColor() const
 {
 	return cfg.background;
 }
 
 
-/* 
+/*
  * Scene
  */
 
@@ -289,8 +361,8 @@ void GLView::updateAnimationState( bool checked )
 void GLView::initializeGL()
 {
 	GLenum err;
-	
-	if ( scene->options & Scene::DoMultisampling ) {
+
+	if ( scene->hasOption(Scene::DoMultisampling) ) {
 		if ( !glContext->hasExtension( "GL_EXT_framebuffer_multisample" ) ) {
 			scene->options &= ~Scene::DoMultisampling;
 			//qDebug() << "System does not support multisampling";
@@ -320,6 +392,8 @@ void GLView::initializeGL()
 void GLView::updateShaders()
 {
 	makeCurrent();
+	if ( !isValid() )
+		return;
 	scene->updateShaders();
 	update();
 }
@@ -333,21 +407,22 @@ void GLView::glProjection( int x, int y )
 
 	BoundSphere bs = scene->view * scene->bounds();
 
-	if ( scene->options & Scene::ShowAxes ) {
+	if ( scene->hasOption(Scene::ShowAxes) ) {
 		bs |= BoundSphere( scene->view * Vector3(), axis );
 	}
 
-	float bounds = (bs.radius > 1024.0) ? bs.radius : 1024.0;
+	float bounds = (bs.radius > 1024.0 * scale()) ? bs.radius : 1024.0 * scale();
+
 
 	GLdouble nr = fabs( bs.center[2] ) - bounds * 1.5;
 	GLdouble fr = fabs( bs.center[2] ) + bounds * 1.5;
 
 	if ( perspectiveMode || (view == ViewWalk) ) {
 		// Perspective View
-		if ( nr < 1.0 )
-			nr = 1.0;
-		if ( fr < 2.0 )
-			fr = 2.0;
+		if ( nr < 1.0 * scale() )
+			nr = 1.0 * scale();
+		if ( fr < 2.0 * scale() )
+			fr = 2.0 * scale();
 
 		if ( nr > fr ) {
 			// add: swap them when needed
@@ -358,8 +433,8 @@ void GLView::glProjection( int x, int y )
 
 		if ( (fr - nr) < 0.00001f ) {
 			// add: ensure distance
-			nr = 1.0;
-			fr = 2.0;
+			nr = 1.0 * scale();
+			fr = 2.0 * scale();
 		}
 
 		GLdouble h2 = tan( ( cfg.fov / Zoom ) / 360 * M_PI ) * nr;
@@ -381,6 +456,8 @@ void GLView::glProjection( int x, int y )
 void GLView::paintEvent( QPaintEvent * event )
 {
 	makeCurrent();
+	if ( !isValid() )
+		return;
 
 	QPainter painter;
 	painter.begin( this );
@@ -389,7 +466,6 @@ void GLView::paintEvent( QPaintEvent * event )
 void GLView::paintGL()
 {
 #endif
-	
 
 	// Save GL state
 	glPushAttrib( GL_ALL_ATTRIB_BITS );
@@ -399,19 +475,21 @@ void GLView::paintGL()
 	glPushMatrix();
 
 	// Clear Viewport
-	if ( scene->visMode & Scene::VisSilhouette ) {
-		qglClearColor( QColor( 255, 255, 255, 255 ) );
+	if ( scene->hasVisMode(Scene::VisSilhouette) ) {
+		glClearColor( 1.0f, 1.0f, 1.0f, 1.0f );
 	}
-	//glViewport( 0, 0, width(), height() );
+
+	glDisable(GL_FRAMEBUFFER_SRGB);
 	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT );
-	
-	
+
+
 	// Compile the model
 	if ( doCompile ) {
 		textures->setNifFolder( model->getFolder() );
 		scene->make( model );
 		scene->transform( Transform(), scene->timeMin() );
-		axis = (scene->bounds().radius <= 0) ? 1024.0 : scene->bounds().radius;
+
+		axis = (scene->bounds().radius <= 0) ? 1024.0 * scale() : scene->bounds().radius;
 
 		if ( scene->timeMin() != scene->timeMax() ) {
 			if ( time < scene->timeMin() || time > scene->timeMax() )
@@ -446,7 +524,7 @@ void GLView::paintGL()
 		ap( 2, 0 ) = 1; ap( 2, 1 ) = 0; ap( 2, 2 ) = 0;
 	}
 
-	viewTrans.rotation.fromEuler( Rot[0] / 180.0 * PI, Rot[1] / 180.0 * PI, Rot[2] / 180.0 * PI );
+	viewTrans.rotation.fromEuler( deg2rad(Rot[0]), deg2rad(Rot[1]), deg2rad(Rot[2]) );
 	viewTrans.translation = viewTrans.rotation * Pos;
 	viewTrans.rotation = viewTrans.rotation * ap;
 
@@ -460,7 +538,7 @@ void GLView::paintGL()
 	glLoadIdentity();
 
 	// Draw the grid
-	if ( scene->options & Scene::ShowGrid ) {
+	if ( scene->hasOption(Scene::ShowGrid) && !gridDisabled ) {
 		glDisable( GL_ALPHA_TEST );
 		glDisable( GL_BLEND );
 		glDisable( GL_LIGHTING );
@@ -482,7 +560,7 @@ void GLView::paintGL()
 
 		// TODO: Configurable grid in Settings
 		// 1024 game units, major lines every 128, minor lines every 64
-		drawGrid( 1024, 128, 2 );
+		drawGrid( (int)(1024 * scale()), (int)(128 * scale()), 2);
 
 		glPopMatrix();
 	}
@@ -504,18 +582,18 @@ void GLView::paintGL()
 
 	GLfloat mat_spec[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
-	if ( scene->options & Scene::DoLighting ) {
+	if ( scene->hasOption(Scene::DoLighting) ) {
 		// Setup light
 		Vector4 lightDir( 0.0, 0.0, 1.0, 0.0 );
 
 		if ( !frontalLight ) {
-			float decl = declination / 180.0 * PI;
+			float decl = deg2rad( declination );
 			Vector3 v( sin( decl ), 0, cos( decl ) );
-			Matrix m; m.fromEuler( 0, 0, planarAngle / 180.0 * PI );
+			Matrix m; m.fromEuler( 0, 0, deg2rad( planarAngle ) );
 			v = m * v;
 			lightDir = Vector4( viewTrans.rotation * v, 0.0 );
 
-			if ( scene->visMode & Scene::VisLightPos ) {
+			if ( scene->hasVisMode(Scene::VisLightPos) ) {
 				glEnable( GL_BLEND );
 				glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 				glEnable( GL_DEPTH_TEST );
@@ -539,19 +617,32 @@ void GLView::paintGL()
 				glPopMatrix();
 				glDisable( GL_BLEND );
 			}
+		} else {
+			// environment map rotation around the Z axis
+			lightDir[3] = planarAngle / 180.0f;
 		}
 
 		float amb = ambient;
-		if ( (scene->visMode & Scene::VisNormalsOnly)
-			&& (scene->options & Scene::DoTexturing)
-			&& !(scene->options & Scene::DisableShaders) )
-		{
-			amb = 0.1f;
-		}
-		
-		GLfloat mat_amb[] = { amb, amb, amb, 1.0f };
-		GLfloat mat_diff[] = { brightness, brightness, brightness, 1.0f };
-		
+		if ( scene->hasOption(Scene::DisableShaders) )
+			amb *= 0.375f;
+		GLfloat mat_amb[] = { amb, amb, amb, toneMapping };
+
+		const FloatVector4	a6( 0.02729229f, -0.03349948f, -0.93633725f, 0.0f );
+		const FloatVector4	a5( 0.18128491f, -0.17835246f, 1.44207620f, 0.0f );
+		const FloatVector4	a4( -0.31201837f, 0.31944694f, 0.89911656f, 0.0f );
+		const FloatVector4	a3( -0.20153606f, 0.19871284f, -2.38214739f, 0.0f );
+		const FloatVector4	a2( 0.68761390f, -0.68953811f, -0.04892082f, 0.0f );
+		const FloatVector4	a1( -0.57557474f, 0.57604823f, 2.42514495f, 0.0f );
+		const FloatVector4	a0( 1.0f );
+		FloatVector4	c( lightColor );
+		c = ( ( ( ( (c * a6 + a5) * c + a4 ) * c + a3 ) * c + a2 ) * c + a1 ) * c + a0;
+		float	d1 = std::max( c[0], std::max(c[1], c[2]) );
+		float	d0 = std::min( std::max(c[2], -0.039339175f), 0.0f );
+		c = ( c - d0 ) / ( d1 - d0 );
+		c.maxValues( FloatVector4(0.0f) ).minValues( FloatVector4(1.0f) );
+		c *= brightnessL;
+		GLfloat	mat_diff[] = { c[0], c[1], c[2], brightnessScale };
+
 
 		glShadeModel( GL_SMOOTH );
 		//glEnable( GL_LIGHTING );
@@ -561,14 +652,11 @@ void GLView::paintGL()
 		glLightfv( GL_LIGHT0, GL_SPECULAR, mat_diff );
 		glLightfv( GL_LIGHT0, GL_POSITION, lightDir.data() );
 	} else {
-		float amb = 0.5f;
-		if ( scene->options & Scene::DisableShaders ) {
-			amb = 0.0f;
-		}
+		float amb = scene->hasOption(Scene::DisableShaders) ? 0.0f : 0.5f;
 
 		GLfloat mat_amb[] = { amb, amb, amb, 1.0f };
 		GLfloat mat_diff[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-		
+
 
 		glShadeModel( GL_SMOOTH );
 		//glEnable( GL_LIGHTING );
@@ -578,7 +666,7 @@ void GLView::paintGL()
 		glLightfv( GL_LIGHT0, GL_SPECULAR, mat_spec );
 	}
 
-	if ( scene->visMode & Scene::VisSilhouette ) {
+	if ( scene->hasVisMode(Scene::VisSilhouette) ) {
 		GLfloat mat_diff[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 		GLfloat mat_amb[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
@@ -592,7 +680,7 @@ void GLView::paintGL()
 		glLightfv( GL_LIGHT0, GL_SPECULAR, mat_spec );
 	}
 
-	if ( scene->options & Scene::DoMultisampling )
+	if ( scene->hasOption(Scene::DoMultisampling) )
 		glEnable( GL_MULTISAMPLE_ARB );
 
 #ifndef QT_NO_DEBUG
@@ -619,7 +707,7 @@ void GLView::paintGL()
 	// Draw the model
 	scene->draw();
 
-	if ( scene->options & Scene::ShowAxes ) {
+	if ( scene->hasOption(Scene::ShowAxes) ) {
 		// Resize viewport to small corner of screen
 		int axesSize = std::min( width() / 10, 125 );
 		glViewport( 0, 0, axesSize, axesSize );
@@ -695,10 +783,13 @@ void GLView::resizeGL( int width, int height )
 	resize( width, height );
 
 	makeCurrent();
+	if ( !isValid() )
+		return;
 	aspect = (GLdouble)width / (GLdouble)height;
 	glViewport( 0, 0, width, height );
-	qglClearColor( cfg.background );
 
+	glDisable(GL_FRAMEBUFFER_SRGB);
+	qglClearColor(clearColor());
 	update();
 }
 
@@ -715,19 +806,53 @@ void GLView::setFrontalLight( bool frontal )
 	update();
 }
 
+static float convertBrightnessValue( int value )
+{
+	if ( value < 720 ) {
+		// lower half of the slider range: sRGB curve from 0.0 to 1.0
+		if ( value < 1 )
+			return 0.0f;
+		if ( value <= 29 )
+			return float(value) / (720.0f * 12.92f);
+		return float(std::pow((float(value) + 39.6f) / 759.6f, 2.4f));
+	}
+	// upper half of the slider range: exponential from 1.0 to 16.0
+	if ( value == 720 )
+		return 1.0f;
+	if ( value >= 1440 )
+		return 16.0f;
+	return float(std::exp2(float(value - 720) / 180.0f));
+}
+
 void GLView::setBrightness( int value )
 {
-	if ( value > 900 ) {
-		value += pow(value - 900, 1.5);
-	}
+	brightnessScale = convertBrightnessValue( value );
+	update();
+}
 
-	brightness = float(value) / 720.0;
+void GLView::setLightLevel( int value )
+{
+	brightnessL = convertBrightnessValue( value );
+	update();
+}
+
+void GLView::setLightColor( int value )
+{
+	lightColor = float( value ) / 720.0f - 1.0f;
+	lightColor = lightColor * float( std::sqrt(std::fabs(lightColor)) );
+	// color temperature = 6548.04 * exp(lightColor * 2.0401036)
+	update();
+}
+
+void GLView::setToneMapping( int value )
+{
+	toneMapping = float( std::pow( 4.22978723f, float( value - 1440 ) / 720.0f ) );
 	update();
 }
 
 void GLView::setAmbient( int value )
 {
-	ambient = float( value ) / 1440.0;
+	ambient = convertBrightnessValue( value );
 	update();
 }
 
@@ -803,7 +928,7 @@ int indexAt( /*GLuint *buffer,*/ NifModel * model, Scene * scene, QList<DrawFunc
 	glShadeModel( GL_FLAT );
 	glEnable( GL_DEPTH_TEST );
 	glDepthFunc( GL_LEQUAL );
-	glClearColor( 0, 0, 0, 1 );
+	glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
 	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 
 	// Rasterize the scene
@@ -837,7 +962,7 @@ int indexAt( /*GLuint *buffer,*/ NifModel * model, Scene * scene, QList<DrawFunc
 
 	// Pick BSFurnitureMarker
 	if ( choose > 0 ) {
-		auto furnBlock = model->getBlock( model->index( 3, 0, model->getBlock( choose & 0x0ffff ) ), "BSFurnitureMarker" );
+		auto furnBlock = model->getBlockIndex( model->index( 3, 0, model->getBlockIndex( choose & 0x0ffff ) ), "BSFurnitureMarker" );
 
 		if ( furnBlock.isValid() ) {
 			furn = choose >> 16;
@@ -855,6 +980,8 @@ QModelIndex GLView::indexAt( const QPoint & pos, int cycle )
 		return QModelIndex();
 
 	makeCurrent();
+	if ( !isValid() )
+		return {};
 
 	glPushAttrib( GL_ALL_ATTRIB_BITS );
 	glMatrixMode( GL_PROJECTION );
@@ -867,13 +994,13 @@ QModelIndex GLView::indexAt( const QPoint & pos, int cycle )
 
 	QList<DrawFunc> df;
 
-	if ( scene->options & Scene::ShowCollision )
+	if ( scene->hasOption(Scene::ShowCollision) )
 		df << &Scene::drawHavok;
 
-	if ( scene->options & Scene::ShowNodes )
+	if ( scene->hasOption(Scene::ShowNodes) )
 		df << &Scene::drawNodes;
 
-	if ( scene->options & Scene::ShowMarkers )
+	if ( scene->hasOption(Scene::ShowMarkers) )
 		df << &Scene::drawFurn;
 
 	df << &Scene::drawShapes;
@@ -889,7 +1016,7 @@ QModelIndex GLView::indexAt( const QPoint & pos, int cycle )
 
 	QModelIndex chooseIndex;
 
-	if ( scene->selMode & Scene::SelVertex ) {
+	if ( scene->isSelModeVertex() ) {
 		// Vertex
 		int block = choose >> 16;
 		int vert = choose - (block << 16);
@@ -899,12 +1026,12 @@ QModelIndex GLView::indexAt( const QPoint & pos, int cycle )
 			chooseIndex = shape->vertexAt( vert );
 	} else if ( choose != -1 ) {
 		// Block Index
-		chooseIndex = model->getBlock( choose );
+		chooseIndex = model->getBlockIndex( choose );
 
 		if ( furn != -1 ) {
 			// Furniture Row @ Block Index
 			chooseIndex = model->index( furn, 0, model->index( 3, 0, chooseIndex ) );
-		}			
+		}
 	}
 
 	return chooseIndex;
@@ -918,7 +1045,7 @@ void GLView::center()
 
 void GLView::move( float x, float y, float z )
 {
-	Pos += Matrix::euler( Rot[0] / 180 * PI, Rot[1] / 180 * PI, Rot[2] / 180 * PI ).inverted() * Vector3( x, y, z );
+	Pos += Matrix::euler( deg2rad(Rot[0]), deg2rad(Rot[1]), deg2rad(Rot[2]) ).inverted() * Vector3( x, y, z );
 	updateViewpoint();
 	update();
 }
@@ -927,19 +1054,6 @@ void GLView::rotate( float x, float y, float z )
 {
 	Rot += Vector3( x, y, z );
 	updateViewpoint();
-	update();
-}
-
-void GLView::zoom( float z )
-{
-	Zoom *= z;
-
-	if ( Zoom < ZOOM_MIN )
-		Zoom = ZOOM_MIN;
-
-	if ( Zoom > ZOOM_MAX )
-		Zoom = ZOOM_MAX;
-
 	update();
 }
 
@@ -960,8 +1074,8 @@ void GLView::setCenter()
 		// Center on entire mesh
 		BoundSphere bs = scene->bounds();
 
-		if ( bs.radius < 1 )
-			bs.radius = 1024.0;
+		if ( bs.radius < 1 * scale() )
+			bs.radius = 1024.0 * scale();
 
 		setDistance( bs.radius * 1.2 );
 		setZoom( 1.0 );
@@ -1005,6 +1119,13 @@ void GLView::setRotation( float x, float y, float z )
 void GLView::setZoom( float z )
 {
 	Zoom = z;
+
+	if (Zoom < ZOOM_MIN)
+		Zoom = ZOOM_MIN;
+
+	if (Zoom > ZOOM_MAX)
+		Zoom = ZOOM_MAX;
+
 	update();
 }
 
@@ -1132,7 +1253,7 @@ void GLView::setCurrentIndex( const QModelIndex & index )
 	if ( !( model && index.model() == model ) )
 		return;
 
-	scene->currentBlock = model->getBlock( index );
+	scene->currentBlock = model->getBlockIndex( index );
 	scene->currentIndex = index.sibling( index.row(), 0 );
 
 	update();
@@ -1225,7 +1346,7 @@ void GLView::setSceneSequence( const QString & seqname )
 		// Called from self and not UI
 		emit sequenceChanged( seqname );
 	}
-	
+
 	scene->setSequence( seqname );
 	time = scene->timeMin();
 	emit sceneTimeChanged( time, scene->timeMin(), scene->timeMax() );
@@ -1280,10 +1401,10 @@ void GLView::advanceGears()
 		if ( time > scene->timeMax() ) {
 			if ( ( animState & AnimSwitch ) && !scene->animGroups.isEmpty() ) {
 				int ix = scene->animGroups.indexOf( scene->animGroup );
-	
+
 				if ( ++ix >= scene->animGroups.count() )
 					ix -= scene->animGroups.count();
-	
+
 				setSceneSequence( scene->animGroups.value( ix ) );
 			} else if ( animState & AnimLoop ) {
 				time = scene->timeMin();
@@ -1312,21 +1433,23 @@ void GLView::advanceGears()
 	if ( kbd[ Qt::Key_Left ] )  rotate( 0, 0, -cfg.rotSpd * dT );
 	if ( kbd[ Qt::Key_Right ] ) rotate( 0, 0, +cfg.rotSpd * dT );
 
+	// Fix movement speed for Starfield scale
+	dT *= scale();
 	// Movement
 	if ( kbd[ Qt::Key_A ] ) move( +cfg.moveSpd * dT, 0, 0 );
 	if ( kbd[ Qt::Key_D ] ) move( -cfg.moveSpd * dT, 0, 0 );
 	if ( kbd[ Qt::Key_W ] ) move( 0, 0, +cfg.moveSpd * dT );
 	if ( kbd[ Qt::Key_S ] ) move( 0, 0, -cfg.moveSpd * dT );
-	//if ( kbd[ Qt::Key_F ] ) move( 0, +MOV_SPD * dT, 0 );
-	//if ( kbd[ Qt::Key_R ] ) move( 0, -MOV_SPD * dT, 0 );
+	if ( kbd[ Qt::Key_Q ] ) move( 0, +cfg.moveSpd * dT, 0 );
+	if ( kbd[ Qt::Key_E ] ) move( 0, -cfg.moveSpd * dT, 0 );
 
 	// Zoom
-	if ( kbd[ Qt::Key_Q ] ) setDistance( Dist * 1.0 / 1.1 );
-	if ( kbd[ Qt::Key_E ] ) setDistance( Dist * 1.1 );
+	//if ( kbd[ Qt::Key_R ] ) setDistance( Dist / ZOOM_QE_KEY_MULT );
+	//if ( kbd[ Qt::Key_F ] ) setDistance( Dist * ZOOM_QE_KEY_MULT );
 
 	// Focal Length
-	if ( kbd[ Qt::Key_PageUp ] )   zoom( 1.1f );
-	if ( kbd[ Qt::Key_PageDown ] ) zoom( 1 / 1.1f );
+	if ( kbd[ Qt::Key_PageUp ] )   setZoom( Zoom * ZOOM_PAGE_KEY_MULT );
+	if ( kbd[ Qt::Key_PageDown ] ) setZoom( Zoom / ZOOM_PAGE_KEY_MULT );
 
 	if ( mouseMov[0] != 0 || mouseMov[1] != 0 || mouseMov[2] != 0 ) {
 		move( mouseMov[0], mouseMov[1], mouseMov[2] );
@@ -1337,6 +1460,9 @@ void GLView::advanceGears()
 		rotate( mouseRot[0], mouseRot[1], mouseRot[2] );
 		mouseRot = Vector3();
 	}
+
+	// update display without movement
+	if ( kbd[ Qt::Key_M ] ) update();
 }
 
 
@@ -1349,48 +1475,42 @@ void GLView::saveImage()
 	dlg->setLayout( lay );
 	dlg->setMinimumWidth( 400 );
 
+	// Save file format, quality and default screenshot path
+	int imgFormat, jpegQuality;
+	QString imgPath;
+	{
+		QSettings settings;
+		jpegQuality = settings.value( "JPEG/Quality", 90 ).toInt();
+		imgFormat = settings.value( "Screenshot/Format", 0 ).toInt();
+		imgPath = settings.value( "Screenshot/Folder", "screenshots" ).toString();
+	}
+
 	QString date = QDateTime::currentDateTime().toString( "yyyyMMdd_HH-mm-ss" );
 	QString name = model->getFilename();
 
 	QString nifFolder = model->getFolder();
-	// TODO: Default extension in Settings
-	QString filename = name + (!name.isEmpty() ? "_" : "") + date + ".jpg";
+	QString filename = name + (!name.isEmpty() ? "_" : "") + date + (imgFormat == 0 ? ".jpg" : ".png");
 
 	// Default: NifSkope directory
-	// TODO: User-configurable default screenshot path in Options
 	QString nifskopePath = "screenshots/" + filename;
 	// Absolute: NIF directory
 	QString nifPath = nifFolder + (!nifFolder.isEmpty() ? "/" : "") + filename;
 
 	FileSelector * file = new FileSelector( FileSelector::SaveFile, tr( "File" ), QBoxLayout::LeftToRight );
 	file->setParent( dlg );
-	// TODO: Default extension in Settings
 	file->setFilter( { "Images (*.jpg *.png *.webp *.bmp)", "JPEG (*.jpg)", "PNG (*.png)", "WebP (*.webp)", "BMP (*.bmp)" } );
-	file->setFile( nifskopePath );
+	file->setFile( imgPath + "/" + filename  );
 	lay->addWidget( file, 0, 0, 1, -1 );
 
-	auto grpDir = new QButtonGroup( dlg );
-	
-	QRadioButton * nifskopeDir = new QRadioButton( tr( "NifSkope Directory" ), dlg );
-	nifskopeDir->setChecked( true );
+	QPushButton * nifskopeDir = new QPushButton( tr( "NifSkope Directory" ), dlg );
 	nifskopeDir->setToolTip( tr( "Save to NifSkope screenshots directory" ) );
 
-	QRadioButton * niffileDir = new QRadioButton( tr( "NIF Directory" ), dlg );
-	niffileDir->setChecked( false );
+	QPushButton * niffileDir = new QPushButton( tr( "NIF Directory" ), dlg );
 	niffileDir->setDisabled( nifFolder.isEmpty() );
 	niffileDir->setToolTip( tr( "Save to NIF file directory" ) );
 
-	grpDir->addButton( nifskopeDir );
-	grpDir->addButton( niffileDir );
-	grpDir->setExclusive( true );
-
 	lay->addWidget( nifskopeDir, 1, 0, 1, 1 );
 	lay->addWidget( niffileDir, 1, 1, 1, 1 );
-
-	// Save JPEG Quality
-	QSettings settings;
-	int jpegQuality = settings.value( "JPEG/Quality", 90 ).toInt();
-	settings.setValue( "JPEG/Quality", jpegQuality );
 
 	QHBoxLayout * pixBox = new QHBoxLayout;
 	pixBox->setAlignment( Qt::AlignRight );
@@ -1405,29 +1525,24 @@ void GLView::saveImage()
 	lay->addLayout( pixBox, 1, 2, Qt::AlignRight );
 
 
-	// Image Size radio button lambda
-	auto btnSize = [dlg]( const QString & name ) {
-		auto btn = new QRadioButton( name, dlg );
-		btn->setCheckable( true );
-		
-		return btn;
-	};
-
 	// Get max viewport size for platform
-	GLint dims;
-	glGetIntegerv( GL_MAX_VIEWPORT_DIMS, &dims );
-	int maxSize = dims;
+	GLint	dims[2];
+	glGetIntegerv( GL_MAX_VIEWPORT_DIMS, dims );
 
 	// Default size
-	auto btnOneX = btnSize( "1x" );
+	auto btnOneX = new QRadioButton( "1x", dlg );
+	btnOneX->setCheckable( true );
 	btnOneX->setChecked( true );
 	// Disable any of these that would exceed the max viewport size of the platform
-	auto btnTwoX = btnSize( "2x" );
-	btnTwoX->setDisabled( (width() * 2) > maxSize || (height() * 2) > maxSize );
-	auto btnFourX = btnSize( "4x" );
-	btnFourX->setDisabled( (width() * 4) > maxSize || (height() * 4) > maxSize );
-	auto btnEightX = btnSize( "8x" );
-	btnEightX->setDisabled( (width() * 8) > maxSize || (height() * 8) > maxSize );
+	auto btnTwoX = new QRadioButton( "2x", dlg );
+	btnTwoX->setCheckable( true );
+	btnTwoX->setDisabled( (width() * 2) > dims[0] || (height() * 2) > dims[1] );
+	auto btnFourX = new QRadioButton( "4x", dlg );
+	btnFourX->setCheckable( true );
+	btnFourX->setDisabled( (width() * 4) > dims[0] || (height() * 4) > dims[1] );
+	auto btnEightX = new QRadioButton( "8x", dlg );
+	btnEightX->setCheckable( true );
+	btnEightX->setDisabled( (width() * 8) > dims[0] || (height() * 8) > dims[1] );
 
 
 	auto grpBox = new QGroupBox( tr( "Image Size" ), dlg );
@@ -1447,7 +1562,7 @@ void GLView::saveImage()
 	grpSize->addButton( btnEightX, 8 );
 
 	grpSize->setExclusive( true );
-	
+
 	lay->addWidget( grpBox, 2, 0, 1, -1 );
 
 
@@ -1459,14 +1574,14 @@ void GLView::saveImage()
 	lay->addLayout( hBox, 3, 0, 1, -1 );
 
 	// Set FileSelector to NifSkope dir (relative)
-	connect( nifskopeDir, &QRadioButton::clicked, [=]()
+	connect( nifskopeDir, &QPushButton::clicked, [=]()
 		{
 			file->setText( nifskopePath );
 			file->setFile( nifskopePath );
 		}
 	);
 	// Set FileSelector to NIF File dir (absolute)
-	connect( niffileDir, &QRadioButton::clicked, [=]()
+	connect( niffileDir, &QPushButton::clicked, [=]()
 		{
 			file->setText( nifPath );
 			file->setFile( nifPath );
@@ -1474,54 +1589,59 @@ void GLView::saveImage()
 	);
 
 	// Validate on OK
-	connect( btnOk, &QPushButton::clicked, [&]() 
+	connect( btnOk, &QPushButton::clicked, [&]()
 		{
-			// Save JPEG Quality
+			imgPath = file->file();
+#ifdef Q_OS_WIN32
+			imgPath.replace( QChar('\\'), QChar('/') );
+#endif
+			imgPath.truncate( imgPath.lastIndexOf( QChar('/') ) );
+			bool isPNG = file->file().endsWith( ".png", Qt::CaseInsensitive );
+			// Save JPEG Quality and other settings
 			QSettings settings;
 			settings.setValue( "JPEG/Quality", pixQuality->value() );
-
-			// TODO: Set up creation of screenshots directory in Options
-			if ( nifskopeDir->isChecked() ) {
-				QDir workingDir;
-				workingDir.mkpath( "screenshots" );
-			}
+			settings.setValue( "Screenshot/Format", int(isPNG) );
+			if ( !imgPath.isEmpty() )
+				settings.setValue( "Screenshot/Folder", imgPath );
 
 			// Supersampling
 			int ss = grpSize->checkedId();
 
-			int w, h;
-
-			w = width();
-			h = height();
+			int w = width();
+			int h = height();
 
 			// Resize viewport for supersampling
-			if ( ss > 1 ) {
-				w *= ss;
-				h *= ss;
+			if ( ss > 1 )
+				resizeGL( w * ss, h * ss );
 
-				resizeGL( w, h );
-			}
-			
 			QOpenGLFramebufferObjectFormat fboFmt;
 			fboFmt.setTextureTarget( GL_TEXTURE_2D );
-			fboFmt.setInternalTextureFormat( GL_RGB );
+			fboFmt.setInternalTextureFormat( !isPNG ? GL_SRGB8 : GL_SRGB8_ALPHA8 );
 			fboFmt.setMipmap( false );
 			fboFmt.setAttachment( QOpenGLFramebufferObject::Attachment::Depth );
 			fboFmt.setSamples( 16 / ss );
 
-			QOpenGLFramebufferObject fbo( w, h, fboFmt );
+			QOpenGLFramebufferObject fbo( w * ss, h * ss, fboFmt );
 			fbo.bind();
 
+			const QColor & c = cfg.background;
+			if ( isPNG ) {
+				glClearColor( c.redF(), c.greenF(), c.blueF(), 0.0f );
+				gridDisabled = true;
+			}
 			update();
 			updateGL();
+			gridDisabled = false;
+			glClearColor( c.redF(), c.greenF(), c.blueF(), c.alphaF() );
 
 			fbo.release();
 
-			QImage * img = new QImage(fbo.toImage());
+			QImage fboImg( fbo.toImage() );
+			QImage img( fboImg.constBits(), fboImg.width(), fboImg.height(), ( !isPNG ? QImage::Format_RGB32 : QImage::Format_ARGB32 ) );
 
 			// Return viewport to original size
 			if ( ss > 1 )
-				resizeGL( width(), height() );
+				resizeGL( w, h );
 
 
 			QImageWriter writer( file->file() );
@@ -1534,19 +1654,21 @@ void GLView::saveImage()
 			if ( file->file().endsWith( ".jpg", Qt::CaseInsensitive ) ) {
 				writer.setFormat( "jpg" );
 				writer.setQuality( 50 + pixQuality->value() / 2 );
+				writer.setOptimizedWrite( true );
+				writer.setProgressiveScanWrite( true );
 			} else if ( file->file().endsWith( ".webp", Qt::CaseInsensitive ) ) {
 				writer.setFormat( "webp" );
 				writer.setQuality( 75 + pixQuality->value() / 4 );
+			} else if ( isPNG ) {
+				writer.setFormat( "png" );
+				writer.setQuality( 50 + pixQuality->value() / 2 );
 			}
 
-			if ( writer.write( *img ) ) {
+			if ( writer.write( img ) ) {
 				dlg->accept();
 			} else {
 				Message::critical( this, tr( "Could not save %1" ).arg( file->file() ) );
 			}
-
-			delete img;
-			img = nullptr;
 		}
 	);
 	connect( btnCancel, &QPushButton::clicked, dlg, &QDialog::reject );
@@ -1557,8 +1679,8 @@ void GLView::saveImage()
 }
 
 
-/* 
- * QWidget Event Handlers 
+/*
+ * QWidget Event Handlers
  */
 
 void GLView::dragEnterEvent( QDragEnterEvent * e )
@@ -1600,14 +1722,14 @@ void GLView::dragMoveEvent( QDragMoveEvent * e )
 		fnDragTexOrg = QString();
 	}
 
-	QModelIndex iObj = model->getBlock( indexAt( e->pos() ), "NiAVObject" );
+	QModelIndex iObj = model->getBlockIndex( indexAt( e->pos() ), "NiAVObject" );
 
 	if ( iObj.isValid() ) {
 		for ( const auto l : model->getChildLinks( model->getBlockNumber( iObj ) ) ) {
-			QModelIndex iTxt = model->getBlock( l, "NiTexturingProperty" );
+			QModelIndex iTxt = model->getBlockIndex( l, "NiTexturingProperty" );
 
 			if ( iTxt.isValid() ) {
-				QModelIndex iSrc = model->getBlock( model->getLink( iTxt, "Base Texture/Source" ), "NiSourceTexture" );
+				QModelIndex iSrc = model->getBlockIndex( model->getLink( iTxt, "Base Texture/Source" ), "NiSourceTexture" );
 
 				if ( iSrc.isValid() ) {
 					iDragTarget = model->getIndex( iSrc, "File Name" );
@@ -1655,6 +1777,7 @@ void GLView::keyPressEvent( QKeyEvent * event )
 	//case Qt::Key_F:
 	case Qt::Key_Q:
 	case Qt::Key_E:
+	case Qt::Key_M:
 	case Qt::Key_Space:
 		kbd[event->key()] = true;
 		break;
@@ -1689,6 +1812,7 @@ void GLView::keyReleaseEvent( QKeyEvent * event )
 	//case Qt::Key_F:
 	case Qt::Key_Q:
 	case Qt::Key_E:
+	case Qt::Key_M:
 	case Qt::Key_Space:
 		kbd[event->key()] = false;
 		break;
@@ -1715,7 +1839,7 @@ void GLView::mouseMoveEvent( QMouseEvent * event )
 
 	if ( event->buttons() & Qt::LeftButton && !kbd[Qt::Key_Space] ) {
 		mouseRot += Vector3( dy * .5, 0, dx * .5 );
-	} else if ( (event->buttons() & Qt::MidButton) || (event->buttons() & Qt::LeftButton && kbd[Qt::Key_Space]) ) {
+	} else if ( (event->buttons() & Qt::MiddleButton) || (event->buttons() & Qt::LeftButton && kbd[Qt::Key_Space]) ) {
 		float d = axis / (qMax( width(), height() ) + 1);
 		mouseMov += Vector3( dx * d, -dy * d, 0 );
 	} else if ( event->buttons() & Qt::RightButton ) {
@@ -1756,7 +1880,7 @@ void GLView::mouseReleaseEvent( QMouseEvent * event )
 
 	if ( !(mods & Qt::AltModifier) ) {
 		QModelIndex idx = indexAt( event->pos(), cycleSelect );
-		scene->currentBlock = model->getBlock( idx );
+		scene->currentBlock = model->getBlockIndex( idx );
 		scene->currentIndex = idx.sibling( idx.row(), 0 );
 
 		if ( idx.isValid() ) {
@@ -1768,7 +1892,7 @@ void GLView::mouseReleaseEvent( QMouseEvent * event )
 		// Color Picker / Eyedrop tool
 		QOpenGLFramebufferObjectFormat fboFmt;
 		fboFmt.setTextureTarget( GL_TEXTURE_2D );
-		fboFmt.setInternalTextureFormat( GL_RGB );
+		fboFmt.setInternalTextureFormat( GL_SRGB8 );
 		fboFmt.setMipmap( false );
 		fboFmt.setAttachment( QOpenGLFramebufferObject::Attachment::Depth );
 
@@ -1796,9 +1920,14 @@ void GLView::mouseReleaseEvent( QMouseEvent * event )
 void GLView::wheelEvent( QWheelEvent * event )
 {
 	if ( view == ViewWalk )
-		mouseMov += Vector3( 0, 0, event->delta() );
+		mouseMov += Vector3( 0, 0, double( event->angleDelta().y() ) / 480.0 ) * scale();
 	else
-		setDistance( Dist * (event->delta() < 0 ? 1.0 / 0.8 : 0.8) );
+	{
+		if (event->angleDelta().y() < 0)
+			setDistance( Dist / ZOOM_MOUSE_WHEEL_MULT );
+		else
+			setDistance( Dist * ZOOM_MOUSE_WHEEL_MULT );
+	}
 }
 
 

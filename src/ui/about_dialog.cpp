@@ -18,20 +18,11 @@ AboutDialog::AboutDialog( QWidget * parent )
 	<p>NifSkope is free software available under a BSD license.
 	The source is available via <a href='https://github.com/niftools/nifskope'>GitHub</a></p>
 
-	<p>For more information visit the <a href='https://discord.gg/ZFjdN4x'>NifTools Discord</a> or <a href='https://forum.niftools.org'>NifTools forum</a>.<br>
-	To receive support for NifSkope please use the Discord or the 
-	<a href='https://forum.niftools.org/24-nifskope/'>NifSkope Help subforum</a>.</p>
-
 	<p>The most recent version of NifSkope can be downloaded from the <a href='https://github.com/niftools/nifskope/releases'>
 	official GitHub release page</a>.</p>
 	
 	<p>A detailed changelog and the latest developmental builds of NifSkope 
-	<a href='https://github.com/jonwd7/nifskope/releases'>can be found here</a>.</p>
-	
-	<p>For the decompression of BSA (Version 105) files, NifSkope uses <a href='https://github.com/lz4/lz4'>LZ4</a>:<br>
-	LZ4 Library<br>
-	Copyright (c) 2011-2015, Yann Collet<br>
-	All rights reserved.</p>
+	<a href='https://github.com/fo76utils/nifskope/releases'>can be found here</a>.</p>
 	
 	<p>For the generation of mopp code on Windows builds, NifSkope uses <a href='http://www.havok.com'>Havok(R)</a>:<br>
 	Copyright (c) 1999-2008 Havok.com Inc. (and its Licensors).<br>
@@ -83,6 +74,8 @@ AboutDialog::AboutDialog( QWidget * parent )
 	   they desire.<br></center>
 	</p>
 	
+	<p>For bounding sphere calculation, NifSkope uses <a href="https://github.com/hbf/miniball">Miniball</a> by Kaspar Fischer, Bernd Gärtner and Martin Kutz, the code is available under the <a href="http://www.apache.org/licenses/LICENSE-2.0.html">Apache 2 License</a>.
+	</p>
 	)rhtml" );
 
 	ui.text->setText( text );

@@ -1,4 +1,5 @@
 #include "spellbook.h"
+#include "gamemanager.h"
 
 
 // Brief description is deliberately not autolinked to class Spell
@@ -50,23 +51,23 @@ public:
 				qCWarning( nsSpell ) << Spell::tr( "overriding base key frame, all other frames will be cleared" );
 				nif->set<int>( iMorphData, "Num Vertices", nif->get<int>( iMeshData, "Num Vertices" ) );
 				QVector<Vector3> verts = nif->getArray<Vector3>( iMeshData, "Vertices" );
-				nif->updateArray( iFrames.child( 0, 0 ), "Vectors" );
-				nif->setArray( iFrames.child( 0, 0 ), "Vectors", verts );
+				nif->updateArraySize( QModelIndex_child( iFrames ), "Vectors" );
+				nif->setArray( QModelIndex_child( iFrames ), "Vectors", verts );
 				verts.fill( Vector3() );
 
 				for ( int f = 1; f < nif->rowCount( iFrames ); f++ ) {
-					nif->updateArray( iFrames.child( f, 0 ), "Vectors" );
-					nif->setArray<Vector3>( iFrames.child( f, 0 ), "Vectors", verts );
+					nif->updateArraySize( QModelIndex_child( iFrames, f ), "Vectors" );
+					nif->setArray<Vector3>( QModelIndex_child( iFrames, f ), "Vectors", verts );
 				}
 			} else {
 				QVector<Vector3> verts = nif->getArray<Vector3>( iMeshData, "Vertices" );
-				QVector<Vector3> base  = nif->getArray<Vector3>( iFrames.child( 0, 0 ), "Vectors" );
+				QVector<Vector3> base  = nif->getArray<Vector3>( QModelIndex_child( iFrames ), "Vectors" );
 				QVector<Vector3> frame( base.count(), Vector3() );
 
 				for ( int n = 0; n < base.count(); n++ )
 					frame[ n ] = verts.value( n ) - base[ n ];
 
-				nif->setArray<Vector3>( iFrames.child( selFrame, 0 ), "Vectors", frame );
+				nif->setArray<Vector3>( QModelIndex_child( iFrames, selFrame ), "Vectors", frame );
 			}
 		}
 
@@ -76,12 +77,12 @@ public:
 	//! Helper function to get the Mesh data
 	QModelIndex getMeshData( const NifModel * nif, const QModelIndex & iMorpher )
 	{
-		QModelIndex iMesh = nif->getBlock( nif->getParent( nif->getBlockNumber( iMorpher ) ) );
+		QModelIndex iMesh = nif->getBlockIndex( nif->getParent( nif->getBlockNumber( iMorpher ) ) );
 
-		if ( nif->inherits( iMesh, "NiTriBasedGeom" ) ) {
-			QModelIndex iData = nif->getBlock( nif->getLink( iMesh, "Data" ) );
+		if ( nif->blockInherits( iMesh, "NiTriBasedGeom" ) ) {
+			QModelIndex iData = nif->getBlockIndex( nif->getLink( iMesh, "Data" ) );
 
-			if ( nif->inherits( iData, "NiTriBasedGeomData" ) )
+			if ( nif->blockInherits( iData, "NiTriBasedGeomData" ) )
 				return iData;
 
 			return QModelIndex();
@@ -93,7 +94,7 @@ public:
 	//! Helper function to get the morph data
 	QModelIndex getMorphData( const NifModel * nif, const QModelIndex & iMorpher )
 	{
-		return nif->getBlock( nif->getLink( iMorpher, "Data" ), "NiMorphData" );
+		return nif->getBlockIndex( nif->getLink( iMorpher, "Data" ), "NiMorphData" );
 	}
 
 	//! Helper function to get the morph frame array
@@ -111,7 +112,7 @@ public:
 			QStringList list;
 
 			for ( int i = 0; i < nif->rowCount( iFrames ); i++ ) {
-				list << nif->get<QString>( iFrames.child( i, 0 ), "Frame Name" );
+				list << nif->get<QString>( QModelIndex_child( iFrames, i ), "Frame Name" );
 			}
 
 			return list;

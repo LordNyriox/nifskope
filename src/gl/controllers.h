@@ -354,7 +354,11 @@ namespace EffectFloat
 		U_Offset = 6,
 		U_Scale = 7,
 		V_Offset = 8,
-		V_Scale = 9
+		V_Scale = 9,
+		U_Offset_F76 = 11,
+		U_Scale_F76 = 12,
+		V_Offset_F76 = 13,
+		V_Scale_F76 = 14
 	};
 }
 
@@ -397,6 +401,7 @@ namespace LightingFloat
 	enum Variable
 	{
 		Refraction_Strength = 0,
+		Emissive_Multiple_F76 = 3,
 		Reflection_Strength = 8,
 		Glossiness = 9,
 		Specular_Strength = 10,

@@ -69,7 +69,7 @@ class ReferenceBrowser;
 class SettingsDialog;
 class SpellBook;
 class FSArchiveHandler;
-class BSA;
+class BA2File;
 class BSAModel;
 class BSAProxyModel;
 class QStandardItemModel;
@@ -78,7 +78,6 @@ class QActionGroup;
 class QComboBox;
 class QGraphicsScene;
 class QProgressBar;
-class QStringList;
 class QTimer;
 class QTreeView;
 class QUdpSocket;
@@ -167,9 +166,10 @@ public slots:
 	void openFile( QString & );
 	void openFiles( QStringList & );
 
+	bool loadArchivesFromFolder( QString );
 	void openArchive( const QString & );
 	void openArchiveFile( const QModelIndex & );
-	void openArchiveFileString( BSA *, const QString & );
+	void openArchiveFileString( const BA2File *, const QString & );
 
 	void enableUi();
 
@@ -179,6 +179,12 @@ public slots:
 	void select( const QModelIndex & );
 
 	// Automatic slots
+
+	//! Close all resource folders and files.
+	void on_aCloseArchives_triggered();
+
+	//! Flush texture cache and update view.
+	void on_aUpdateView_triggered();
 
 	//! Reparse the nif.xml and kfm.xml files.
 	void on_aLoadXML_triggered();
@@ -203,12 +209,12 @@ public slots:
 	void on_aViewTop_triggered( bool );
 	void on_aViewFront_triggered( bool );
 	void on_aViewLeft_triggered( bool );
-	
+
 	void on_aViewCenter_triggered();
 	void on_aViewFlip_triggered( bool );
 	void on_aViewPerspective_toggled( bool );
 	void on_aViewWalk_triggered( bool );
-	
+
 	void on_aViewUser_toggled( bool );
 	void on_aViewUserSave_triggered( bool );
 
@@ -222,6 +228,7 @@ protected slots:
 	void saveAsDlg();
 
 	void archiveDlg();
+	void archiveFolderDlg();
 
 	void load();
 	void save();
@@ -250,8 +257,10 @@ protected slots:
 	 * @see importex/importex.cpp
 	 */
 	void fillImportExportMenus();
+	void updateImportExportMenu(const QMenu* menu);
 	//! Perform Import or Export
-	void sltImportExport( QAction * action );
+	void sltImport( QAction* action );
+	void sltExport( QAction* action );
 
 	//! Open a URL using the system handler
 	void openURL();
@@ -286,11 +295,14 @@ private:
 
 	void openRecentArchive();
 	void openRecentArchiveFile();
-	void setCurrentArchive( BSA * );
+	void setCurrentArchive( bool );
 	void setCurrentArchiveFile( const QString & );
 	void clearCurrentArchive();
 	void updateRecentArchiveActions();
 	void updateRecentArchiveFileActions();
+
+	//! Currently selected NiBlock index in the list or tree view
+	QModelIndex currentNifIndex() const;
 
 	//! Disconnect and reconnect the models to the views
 	void swapModels();
@@ -319,7 +331,9 @@ private:
 	nstheme::ToolbarSize toolbarSize = nstheme::ToolbarLarge;
 
 	QString currentFile;
-	BSA * currentArchive = nullptr;
+	QString currentArchivePath;
+	QStringList currentArchiveNames;
+	BA2File * currentArchive = nullptr;
 
 	QByteArray filehash;
 
@@ -349,8 +363,6 @@ private:
 	//! Spellbook instance
 	std::shared_ptr<SpellBook> book;
 
-	std::shared_ptr<FSArchiveHandler> archiveHandler;
-
 	static SettingsDialog * options;
 
 	//! Help browser
@@ -370,7 +382,7 @@ private:
 
 	bool selecting = false;
 	bool initialShowEvent = true;
-	
+
 	QProgressBar * progress = nullptr;
 
 	QDockWidget * dList;

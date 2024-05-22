@@ -62,7 +62,7 @@ public:
 	void clear() override final;
 
 	// generic load and save to and from QIODevice
-	bool load( QIODevice & device ) override final;
+	bool load( QIODevice & device, const char* fileName = nullptr ) override final;
 	bool save( QIODevice & device ) const override final;
 
 	// is it a compound type?
@@ -89,16 +89,14 @@ protected:
 	void insertType( NifItem * parent, const NifData & data, int row = -1 );
 	NifItem * insertBranch( NifItem * parent, const NifData & data, int row = -1 );
 
-	bool updateArrayItem( NifItem * array ) override final;
+	bool updateArraySizeImpl( NifItem * array ) override final;
 
 	bool load( NifItem * parent, NifIStream & stream );
 	bool save( NifItem * parent, NifOStream & stream ) const;
 
-	bool setItemValue( NifItem * item, const NifValue & v ) override final;
+	bool setHeaderString( const QString &, uint ver = 0 ) override final;
 
-	bool setHeaderString( const QString & ) override final;
-
-	bool evalVersion( NifItem * item, bool chkParents = false ) const override final;
+	bool evalVersionImpl( const NifItem * item ) const override final;
 
 	QString ver2str( quint32 v ) const override final { return version2string( v ); }
 	quint32 str2ver( QString s ) const override final { return version2number( s ); }

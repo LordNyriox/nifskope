@@ -12,6 +12,8 @@
 class FSManager;
 class SettingsDialog;
 class QStringListModel;
+class QListWidget;
+class GLView;
 
 namespace Ui {
 class SettingsGeneral;
@@ -75,6 +77,7 @@ public:
 	void read() override final;
 	void write() override final;
 	void setDefault() override final;
+	void setGLView( GLView * ogl );
 
 private:
 	std::unique_ptr<Ui::SettingsRender> ui;
@@ -92,26 +95,30 @@ public:
 	void write() override final;
 	void setDefault() override final;
 
+	void select_first(QListWidget* list);
+	void manager_sync(bool make_connections = false);
+
 public slots:
+	void modifyPane() override;
 	void on_btnFolderAdd_clicked();
+	void on_btnArchiveAdd_clicked();
 	void on_btnFolderRemove_clicked();
 	void on_btnFolderDown_clicked();
 	void on_btnFolderUp_clicked();
 	void on_btnFolderAutoDetect_clicked();
 
-	void on_btnArchiveAdd_clicked();
-	void on_btnArchiveRemove_clicked();
-	void on_btnArchiveDown_clicked();
-	void on_btnArchiveUp_clicked();
-	void on_btnArchiveAutoDetect_clicked();
+	void setFolderList();
+
+	void onBrowseClicked();
 
 private:
 	std::unique_ptr<Ui::SettingsResources> ui;
 
-	FSManager * archiveMgr;
+	QString currentFolderItem();
 
 	QStringListModel * folders;
-	QStringListModel * archives;
+
+	QStringList applicableFolders{ "materials", "textures", "geometries" };
 };
 
 

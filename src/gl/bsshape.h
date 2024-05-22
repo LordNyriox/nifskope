@@ -1,8 +1,7 @@
 #ifndef BSSHAPE_H
 #define BSSHAPE_H
 
-#include "gl/glmesh.h"
-#include "gl/gltools.h"
+#include "gl/glshape.h"
 
 
 class NifModel;
@@ -12,28 +11,16 @@ class BSShape : public Shape
 {
 
 public:
-	BSShape( Scene * s, const QModelIndex & b );
-	~BSShape() { clear(); }
-
-	// IControllable
-
-	void clear() override;
-	void update( const NifModel * nif, const QModelIndex & ) override;
-	void transform() override;
-
-	// end IControllable
+	BSShape( Scene * s, const QModelIndex & b ) : Shape( s, b ) { }
 
 	// Node
 
 	void transformShapes() override;
 
-	void drawShapes( NodeList * secondPass = nullptr, bool presort = false ) override;
+	void drawShapes( NodeList * secondPass = nullptr ) override;
 	void drawSelection() const override;
 
 	BoundSphere bounds() const override;
-
-	bool isHidden() const override;
-	//QString textStats() const override;
 
 	// end Node
 
@@ -43,18 +30,12 @@ public:
 	QModelIndex vertexAt( int ) const override;
 
 protected:
+	BoundSphere dataBound;
 
-	QPersistentModelIndex iVertData;
-	QPersistentModelIndex iTriData;
+	bool isDynamic = false;
 
-	QString skinDataName;
-	QString skinInstName;
-
-	int numVerts = 0;
-	int numTris = 0;
-
-	Vector3 bsphereCenter;
-	float bsphereRadius = 0.0;
+	void updateImpl( const NifModel * nif, const QModelIndex & index ) override;
+	void updateData( const NifModel * nif ) override;
 };
 
 #endif // BSSHAPE_H

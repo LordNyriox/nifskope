@@ -1,8 +1,84 @@
  == CHANGELOG ==
 
-**NOTE: This changelog is not maintained for prerelease versions**
+#### NifSkope-2.0.dev9-20240521
 
-You may view the changes since 1.1.3 here: https://github.com/jonwd7/nifskope/releases
+* The screenshot dialog now saves the image format and path selected as settings.
+* Added limited support for rendering Starfield flipbooks and layered emissivity, and for the use vertex color as tint material setting. Flipbooks are currently animated only during movement, or while the M key is pressed.
+* Fixed bugs in rendering ordered nodes.
+* Fixed the axes not being correctly drawn depending on the OpenGL settings from the last shape.
+* Fixes in the lighting only and textures disabled rendering modes.
+* Fixed the hidden flag being ignored on Starfield shapes.
+* Optimizations in the archive manager.
+* Improvements and fixes to Starfield material support. **Note:** loading .mat files from archives is currently disabled for materials that also exist in CDB format. Base game materials can only be replaced with loose .mat files.
+
+#### NifSkope-2.0.dev9-20240505
+
+* Updated for Starfield version 1.11.33.0.
+* Added support for saving screenshots in PNG format with transparency.
+* Fixed U and V scale and offset controllers on Fallout 76 effect materials.
+* Fixed bug in restoring the viewport size after saving supersampled screenshots.
+* Shading is no longer disabled on Starfield models when textures are turned off.
+
+#### NifSkope-2.0.dev9-20240428
+
+* Reworked archive loading, added new file menu option to browse a game or archive folder.
+* The archive browser now displays uncompressed file sizes from BA2 archives.
+* Added support for version 7 and 8 BA2 archives used by the Fallout 4 next gen update.
+* The glass settings added to version 21 Fallout 76 effect materials are now displayed under the material properties.
+* Fixed unused BSShaderTextureSet blocks in Fallout 76 models being incorrectly added to the footer as root links.
+* Fixed reading unknown fields from version 21 Fallout 76 effect materials.
+
+#### NifSkope-2.0.dev9-20240422
+
+* Implemented the Update Bounds and Update All Bounds mesh spells for Starfield. Casting these also updates the vertex and triangle counts on meshes.
+* Updating the bounds of Fallout 76 shapes now also recalculates the bounding box.
+* Fixed duplicate "Update Bounds" entries in the spells menu with models from Skyrim or newer games.
+* Improved bounding sphere calculation, using code from [Miniball](https://github.com/hbf/miniball) by Martin Kutz, Kaspar Fischer and Bernd Gärtner.
+* Implemented rendering Starfield and Fallout 76 bounding boxes and spheres.
+* Added support for reading version 21 Fallout 76 material files. The new data fields (two texture paths and an unknown byte in effect materials) are currently ignored.
+* Fixed emissive multiple controller on Fallout 76 materials.
+* The "Max Filepath" header field is now read as an array of unknown bytes from Starfield NIF files, to avoid converting binary data to UTF-8 on saving the model.
+
+#### NifSkope-2.0.dev9-20240412
+
+* New spell for exporting the resource (geometry, material and texture) files used by the currently loaded model. It is available as an option in the right click menu on file paths, this extracts a single file, and in the main Spells menu to extract all resources required by the model. Note that files are extracted in the correct sub-folders (textures/, materials/, etc.) under the selected destination directory, and Starfield materials are automatically converted to JSON .mat format.
+* New spell to replace all occurrences of a regular expression in resource paths that match a filter regular expression. It currently does not work on paths stored as header strings (like materials), and on abstract data loaded from external files.
+* Resource settings now default to all games being enabled.
+* The planar angle slider of the lighting widget can now be used in frontal light mode to rotate the environment map used by image based lighting.
+* The PBR cube map resolution setting has a new maximum quality option that disables importance sampling at 512x512 resolution per face. Note: changes between the '512x512' and 'max. quality' modes may only take effect after restarting NifSkope if the texture is already cached.
+* Fixed mip level calculation bug in importance sampled cube map filtering.
+* Anti-aliasing is limited to a maximum of 4x on Linux to work around compatibility issues. Additionally, the calculation of sample count has been fixed so that it is set to 2, 4, 8 or 16 as displayed, instead of 1, 4, 9 or 16. The same change has also been applied to anisotropic filtering.
+* Binary packages now include "noavx2" executables for better compatibility with older CPUs, including Ivy Bridge and AMD FX series.
+* Fixed shader compilation error in fo4\_effectshader.frag.
+
+#### NifSkope-2.0.dev9-20240331
+
+Changes compared to the dev9 release from Sep 29, 2023:
+
+* Support for rendering Starfield materials, with limitations: multiple layers are mostly unsupported, and translucency and many other advanced effects are not implemented. Materials can be loaded both from the compiled database (materialsbeta.cdb) and from loose .mat files, the latter is experimental.
+* Image based lighting for Starfield and Fallout 76, can use DDS cube maps or Radiance HDR format images (available for example at [Poly Haven](https://polyhaven.com/hdris), place the .hdr files in textures/cubemaps/ under a folder configured as a data path) as input. The resolution of the pre-filtered cube map and the paths to the textures can be set in the render options.
+* Starfield height maps are implemented using parallax occlusion mapping, with new render settings for the height scale and maximum number of steps.
+* Various rendering fixes for Fallout 76, and some for older games.
+* Skyrim, Fallout 4, Fallout 76 and Starfield shaders have all been modified to use view space vectors instead of tangent space, similarly to the change described [here](https://github.com/Candoran2/nifskope/commit/7e4c6e127e3f2f569d2417bd04cbb7a6bb1bd822). Skyrim parallax mapping has been updated as well to work correctly with this change.
+* Improved physically based rendering for Fallout 76 (also used for Starfield), based on the models by [Brian Karis](https://blog.selfshadow.com/publications/s2013-shading-course/karis/s2013_pbs_epic_notes_v2.pdf) and [Brent Burley](https://blog.selfshadow.com/publications/s2012-shading-course/burley/s2012_pbs_disney_brdf_notes_v3.pdf).
+* Starfield and Fallout 76 material data loaded from external files is added as abstract data to the NIF model.
+* New option in the Render menu (Alt+U) to flush cached textures, reload shaders, and update the display.
+* The integer data (CRC32 of the material path) associated with Starfield materials is now recalculated on changes to the material path. Note that editing the path in the header strings may not automatically update this value and the display, use Update View (Alt+U) or toggle the grid on/off with G to force the update.
+* The Edit String Index spell has a new button for browsing Starfield, Fallout 76 and Fallout 4 materials. Note: using this to swap materials leaves the previous paths as unused strings in the header, those can be cleaned up with 'Spells/Optimize/Remove Unused Strings' and then updating the view (Alt+U).
+* The choose texture spell now browses all texture files available as resources, instead of the file system.
+* New spell to export Starfield materials, it copies the material data from the selected BSLightingShaderProperty to the clipboard in JSON format.
+* Improved lighting widget, with separate controls for the overall brightness and the intensity of directional and ambient light, and new sliders for tone mapping and the color temperature of the light source. There is also a new button for browsing the environment map (.dds or .hdr) used by Fallout 76 and Starfield image based lighting.
+* Reworked resource manager, Fallout 3 and New Vegas have been merged in the resource settings to a single game mode, and removed the Archives tab. Resource data paths can now be folders (from which all archives and supported file types are loaded), single archives and loose files, and paths listed first have higher precedence. Note that a very large number of loose files may result in long load times.
+* The location of the currently opened NIF file is automatically added as a temporary data path. Resources associated with the model can be in archives, or in loose files under the correct sub-directories (textures/, geometries/, etc.).
+* Currently mapped resources can be released with Close Archives (Alt+Q) in the file menu. If a temporary data path is in use, only that is closed first.
+* Fixed bugs in the screenshot dialog, including potential crash due to invalid memory access, and incorrect gamma on Fallout 76 and Starfield screenshots. JPEG files are also written with optimization and in progressive format, slightly reducing the file size at the same quality.
+* Various other bug fixes, including to https://github.com/hexabits/nifskope/issues/51, https://github.com/hexabits/nifskope/issues/56, https://github.com/hexabits/nifskope/issues/61, https://github.com/hexabits/nifskope/issues/62, https://github.com/hexabits/nifskope/issues/64, https://github.com/hexabits/nifskope/issues/65, https://github.com/hexabits/nifskope/issues/67#issuecomment-1858428809 and https://github.com/hexabits/nifskope/issues/74.
+
+### Official releases
+
+**NOTE: This changelog is not maintained for 2.0**
+
+You may view the 2.0 changes here: https://github.com/hexabits/nifskope/releases
 
 
 This is version 1.1.3 of NifSkope.
@@ -244,7 +320,7 @@ changes since 1.0.15:
  * add Fallout 3 to game texture auto detection
  * nif.xml updates for Fallout 3
  * add support for Fallout 3 BSA files
- * add material color override in settings 
+ * add material color override in settings
  * new version condition evaluation engine to handle Fallout
  * using GLee, so nifskope now also compiles on mac
  * update tangent and binormal update script for Fallout as well as rendering
@@ -374,7 +450,7 @@ changes since 1.0:
   - Add ByteMatrix data type for NiPixelData
   - extra space in text editor to ensure that single line strings are nicely displayed on edit
   - Allow for multiple file filters in the file open and save dialogs.
-  - Force C locale so there is at least some consistency somewhere in the app.  
+  - Force C locale so there is at least some consistency somewhere in the app.
       Currently some editors use system locale but Qt forces C locale on some string operations.
   - Fix sync bug when using delete branch
   - Add multiline editor for text fields.  Also sets uniform row height on tree.
@@ -383,8 +459,8 @@ changes since 1.0:
 
  * NIF Compatibility
   - fixes for oblivion skeleton.nif files
-  - Fixes for Emerge Demo and Megami Tensei: Imagine and the NiBoneLODController and related items.  
-  - Fixes for the following: Loki, Guild 2, Warhammer, PCM 2007, 
+  - Fixes for Emerge Demo and Megami Tensei: Imagine and the NiBoneLODController and related items.
+  - Fixes for the following: Loki, Guild 2, Warhammer, PCM 2007,
       1. Added skeleton PhysX blocks from copetech examples
       2. Fixed NiSortNode
       3. Fixed NiPixelData to better match file format
@@ -393,7 +469,7 @@ changes since 1.0:
   - fixed NiGeometryData for 10.1.0.0 nifs
   - Fixes for NiCollisionObject and Multiline text in nifskope.
   - number of vertices in oblivion sub shapes
-  
+
 changes since 0.9.8:
  * User Interface
   - Expanded help menu and renamed "Reference Browser" to "Interactive Help" and made it come up when F1 is pressed.
@@ -420,7 +496,7 @@ changes since 0.9.8:
   - Fixed issue where links in old files weren't mapped if the file didn't load completely.
   - The XML checker window's Block choosing button now has the same new menu structure as the Block > Insert spell.
 
- 
+
  * 3D View
   - Added ability to center the view on the selected node or shape.  Select the node/shape and press the C key.
   - Made it so you can zoom in and out by right-dragging left and right as well as up and down.
@@ -452,14 +528,14 @@ changes since 0.9.8:
   - Fixed a the same bug in 3ds import as was fixed in OBJ import where "Has UV" was not being set properly.
   - Fixed OBJ and 3ds import and export so that NiImage and NiTexture are created in 3.x files, and are detected during OBJ export.
   - Fixed a bug that was causing the "Has UV" bool not to be set correctly when an OBJ file was imported.
-  
+
  * NIF Compatibility
   - Added partial support for the following new games: Loki, Pro Cycling Manager, Shin Megami Tensei
   - Fixed a bug that made NifSkope fail to load the 3.3.0.13 file.
   - Fixed problem with version 3.03 conditions in the XML.  Version 3.1 files can be read again.
   - XML changes which allow NiSkinPartition objects that won't crash Morrowind and Freedom Force to be created.
- 
- * Misc. 
+
+ * Misc.
   - GCC build fixes.
   - Added check for empty QFileSystemWatcher, this removes the nasty qWarning
   - Uninstall now correctly removes all folders.
@@ -536,7 +612,7 @@ changes since 0.9.1:
     because otherwise Oblivion doesn't find textures located within .bsa archives
   - stripifier now outputs single strips
     because CivIV draws only the first strip
-	
+
 
 changes since 0.8.8:
   - now plays embedded animation sequences (good examples are the doors
@@ -557,8 +633,8 @@ changes since 0.8.8:
       copying and pasting between nifs on windows platform)
       note that this works by opening a local udp server socket. communication on
       this socket is limited to local host only. so it shouldn't be a security issue.
- 
-  
+
+
 changes since 0.8.7:
   - havok blocks will be ordered automatically
   - some hot keys for the spells
@@ -566,14 +642,14 @@ changes since 0.8.7:
   - new spell allows editing of string offsets
   - new spell for removing blocks by id
   - new spell to upload morph frames
-  
+
 
 changes since 0.8.6:
   - gundalf contributed a new feature: oblivion furniture
     animation markers
   - Skin Partitions made with NifSkope should now work properly
     on nvidia cards too
-  
+
 
 changes since 0.8.5:
   - fixed compability with older graphic cards

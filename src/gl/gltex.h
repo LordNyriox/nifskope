@@ -33,6 +33,8 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef GLTEX_H
 #define GLTEX_H
 
+#include "gamemanager.h"
+
 #include <QObject> // Inherited
 #include <QByteArray>
 #include <QHash>
@@ -43,7 +45,6 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //! @file gltex.h TexCache etc. header
 
 class NifModel;
-class QFileSystemWatcher;
 class QOpenGLContext;
 
 typedef unsigned int GLuint;
@@ -51,7 +52,7 @@ typedef unsigned int GLenum;
 
 /*! A class for handling OpenGL textures.
  *
- * This class stores information on all loaded textures, and watches the texture files.
+ * This class stores information on all loaded textures.
  */
 class TexCache final : public QObject
 {
@@ -64,10 +65,8 @@ class TexCache final : public QObject
 		QString filename;
 		//! The texture file path.
 		QString filepath;
-		//! The texture data (if not in the filesystem)
-		QByteArray data;
-		//! ID for use with GL texture functions
-		GLuint id = 0;
+		//! IDs for use with GL texture functions
+		GLuint id[2];
 		//! The format target
 		GLenum target = 0; // = 0x0DE1; // GL_TEXTURE_2D
 		//! Width of the texture
@@ -76,12 +75,11 @@ class TexCache final : public QObject
 		GLuint height = 0;
 		//! Number of mipmaps present
 		GLuint mipmaps = 0;
-		//! Determine whether the texture needs reloading
-		bool reload = false;
 		//! Format of the texture
 		QString format;
 		//! Status messages
 		QString status;
+		Game::GameMode	game = Game::OTHER;
 
 		//! Load the texture
 		void load();
@@ -97,9 +95,9 @@ public:
 	~TexCache();
 
 	//! Bind a texture from filename
-	int bind( const QString & fname );
+	int bind( const QString & fname, Game::GameMode game = Game::OTHER, bool useSecondTexture = false );
 	//! Bind a texture from pixel data
-	int bind( const QModelIndex & iSource );
+	int bind( const QModelIndex & iSource, Game::GameMode game = Game::OTHER );
 
 	//! Debug function for getting info about a texture
 	QString info( const QModelIndex & iSource );
@@ -110,14 +108,18 @@ public:
 	bool importFile( NifModel * nif, const QModelIndex & iSource, QModelIndex & iData );
 
 	//! Find a texture based on its filename
-	static QString find( const QString & file, const QString & nifFolder );
-	static QString find( const QString & file, const QString & nifFolder, QByteArray & data );
+	static QString find( const QString & file, Game::GameMode game = Game::OTHER );
 	//! Remove the path from a filename
 	static QString stripPath( const QString & file, const QString & nifFolder );
 	//! Checks whether the given file can be loaded
 	static bool canLoad( const QString & file );
 	//! Checks whether the extension is supported
 	static bool isSupported( const QString & file );
+
+	//! Number of texture units
+	static int	num_texture_units;	// for glActiveTexture()
+	static int	num_txtunits_client;	// for glClientActiveTexture()
+	static int	pbrCubeMapResolution;	// setting bit 0 disables importance sampling
 
 signals:
 	void sigRefresh();
@@ -132,23 +134,15 @@ public slots:
 	 */
 	void setNifFolder( const QString & );
 
-protected slots:
-	void fileChanged( const QString & filepath );
-
 protected:
 	QHash<QString, Tex *> textures;
 	QHash<QModelIndex, Tex *> embedTextures;
-	QFileSystemWatcher * watcher;
-
-	QString nifFolder;
 };
 
 void initializeTextureUnits( const QOpenGLContext * );
 
-bool activateTextureUnit( int x );
-// TODO: The default of 8 is arbitrary because >8 causes GL paint errors
-//	This is a problem only if a mesh uses all 9 texture slots
-void resetTextureUnits( int numTex = 8 );
+bool activateTextureUnit( int x, bool noClient = false );
+void resetTextureUnits( int numTex = 32 );
 
 float get_max_anisotropy();
 

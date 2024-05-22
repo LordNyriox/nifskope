@@ -47,8 +47,10 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ui/widgets/inspect.h"
 #include "ui/about_dialog.h"
 #include "ui/settingsdialog.h"
+#include "gamemanager.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QBuffer>
 #include <QByteArray>
@@ -70,8 +72,8 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <QTreeView>
 #include <QStandardItemModel>
 
-#include <fsengine/bsa.h>
-#include <fsengine/fsmanager.h>
+#include "libfo76utils/src/ba2file.hpp"
+#include "bsamodel.h"
 
 #ifdef WIN32
 #  define WINDOWS_LEAN_AND_MEAN
@@ -89,7 +91,8 @@ const QList<QPair<QString, QString>> NifSkope::filetypes = {
 	// KF types
 	{ "Keyframe", "kf" }, { "Keyframe Animation", "kfa" }, { "Keyframe Motion", "kfm" },
 	// Miscellaneous NIF types
-	{ "NIFCache", "nifcache" }, { "TEXCache", "texcache" }, { "PCPatch", "pcpatch" }, { "JMI", "jmi" }
+	{ "NIFCache", "nifcache" }, { "TEXCache", "texcache" }, { "PCPatch", "pcpatch" }, { "JMI", "jmi" },
+	{ "Divinity 2 Character Template", "cat" }
 };
 
 QStringList NifSkope::fileExtensions()
@@ -142,9 +145,9 @@ NifSkope::NifSkope()
 	ui->setupUi( this );
 
 	qApp->installEventFilter( this );
-	
+
 	// Init Dialogs
-	
+
 	if ( !options )
 		options = new SettingsDialog;
 
@@ -164,7 +167,7 @@ NifSkope::NifSkope()
 	nifEmpty = new NifModel( this );
 	proxyEmpty = new NifProxyModel( this );
 
-	nif->setMessageMode( BaseModel::UserMessage );
+	nif->setMessageMode( BaseModel::MSG_USER );
 
 	// Setup QUndoStack
 	nif->undoStack = new QUndoStack( this );
@@ -204,9 +207,10 @@ NifSkope::NifSkope()
 	tree->header()->resizeSection( NifModel::NameCol, 135 );
 	tree->header()->resizeSection( NifModel::ValueCol, 250 );
 	// Allow multi-row paste
-	//	Note: this has some side effects such as vertex selection 
+	//	Note: this has some side effects such as vertex selection
 	//	in viewport being wrong if you attempt to select many rows.
 	tree->setSelectionMode( QAbstractItemView::ExtendedSelection );
+	tree->doAutoExpanding = true;
 
 	// Header Details
 	header = ui->header;
@@ -255,10 +259,11 @@ NifSkope::NifSkope()
 	ogl->setObjectName( "OGL1" );
 	ogl->setNif( nif );
 	ogl->installEventFilter( this );
+	options->setGLView( ogl );
 
 	// Create InspectView
 	/* ********************** */
-	
+
 	inspect = new InspectView;
 	inspect->setNifModel( nif );
 	inspect->setScene( ogl->getScene() );
@@ -297,7 +302,7 @@ NifSkope::NifSkope()
 
 	// Set central widget and viewport
 	setCentralWidget( graphicsView );
-	
+
 	setContextMenuPolicy( Qt::NoContextMenu );
 
 	// Resize timer for eventFilter()
@@ -333,8 +338,6 @@ void NifSkope::exitRequested()
 	// Must disconnect from this signal as it's set once for each widget for some reason
 	disconnect( qApp, &QApplication::lastWindowClosed, this, &NifSkope::exitRequested );
 
-	FSManager::del();
-
 	if ( options ) {
 		delete options;
 		options = nullptr;
@@ -344,6 +347,8 @@ void NifSkope::exitRequested()
 NifSkope::~NifSkope()
 {
 	delete ui;
+	if ( currentArchive )
+		delete currentArchive;
 }
 
 void NifSkope::swapModels()
@@ -443,7 +448,7 @@ void NifSkope::select( const QModelIndex & index )
 
 	if ( sender() != list ) {
 		if ( list->model() == proxy ) {
-			QModelIndex idxProxy = proxy->mapFrom( nif->getBlock( idx ), list->currentIndex() );
+			QModelIndex idxProxy = proxy->mapFrom( nif->getBlockIndex( idx ), list->currentIndex() );
 
 			// Fix for NiDefaultAVObjectPalette (et al.) bug
 			//	mapFrom() stops at the first result for the given block number,
@@ -476,13 +481,13 @@ void NifSkope::select( const QModelIndex & index )
 			}
 
 		} else if ( list->model() == nif ) {
-			list->setCurrentIndex( nif->getBlockOrHeader( idx ) );
+			list->setCurrentIndex( nif->getTopIndex( idx ) );
 		}
 	}
 
 	if ( sender() != tree ) {
 		if ( dList->isVisible() ) {
-			QModelIndex root = nif->getBlockOrHeader( idx );
+			QModelIndex root = nif->getTopIndex( idx );
 
 			if ( tree->rootIndex() != root )
 				tree->setRootIndex( root );
@@ -561,7 +566,7 @@ QString strippedName( const QString & fullFileName )
 
 int updateRecentActions( QAction * acts[], const QStringList & files )
 {
-	int numRecentFiles = std::min( files.size(), (int)NifSkope::NumRecentFiles );
+	int numRecentFiles = std::min< qsizetype >( files.size(), NifSkope::NumRecentFiles );
 
 	for ( int i = 0; i < numRecentFiles; ++i ) {
 		QString text = QString( "&%1 %2" ).arg( i + 1 ).arg( strippedName( files[i] ) );
@@ -648,6 +653,9 @@ void NifSkope::setCurrentArchiveFile( const QString & filepath )
 	QString path = filepath;
 	path.replace( bsa + "/", "" );
 
+	if ( !currentArchiveNames.empty() )
+		bsa = currentArchiveNames.back();
+
 	QSettings settings;
 	QHash<QString, QVariant> hash = settings.value( "File/Recent Archive Files" ).toHash();
 
@@ -673,15 +681,22 @@ void NifSkope::clearCurrentFile()
 	updateAllRecentFileActions();
 }
 
-void NifSkope::setCurrentArchive( BSA * bsa )
+void NifSkope::setCurrentArchive( bool isArchiveFolder )
 {
-	currentArchive = bsa;
-
-	QString file = currentArchive->path();
+	QString	archiveName( currentArchivePath );
+	qsizetype	n = -1;
+	if ( isArchiveFolder && archiveName.length() > 5 ) {
+		if ( archiveName.endsWith( "/Data", Qt::CaseInsensitive ) || archiveName.endsWith( "\\Data", Qt::CaseInsensitive ) )
+			n = -6;
+	}
+	archiveName = archiveName.mid( archiveName.lastIndexOf( QChar('/'), n ) + 1 );
+	if ( isArchiveFolder )
+		archiveName += "/*.bsa,*.ba2";
+	currentArchiveNames += archiveName;
 
 	QSettings settings;
 	QStringList files = settings.value( "File/Recent Archive List" ).toStringList();
-	::updateRecentFiles( files, file );
+	::updateRecentFiles( files, currentArchivePath );
 
 	settings.setValue( "File/Recent Archive List", files );
 
@@ -690,13 +705,21 @@ void NifSkope::setCurrentArchive( BSA * bsa )
 
 void NifSkope::clearCurrentArchive()
 {
+	if ( !currentArchive )
+		return;
+
 	QSettings settings;
 	QStringList files = settings.value( "File/Recent Archive List" ).toStringList();
 
-	files.removeAll( currentArchive->path() );
+	files.removeAll( currentArchivePath );
 	settings.setValue( "File/Recent Archive List", files );
 
 	updateAllRecentFileActions();
+
+	currentArchivePath.clear();
+	currentArchiveNames.clear();
+	delete currentArchive;
+	currentArchive = nullptr;
 }
 
 void NifSkope::updateRecentArchiveActions()
@@ -714,16 +737,33 @@ void NifSkope::updateRecentArchiveFileActions()
 	QSettings settings;
 	QHash<QString, QVariant> hash = settings.value( "File/Recent Archive Files" ).toHash();
 
-	if ( !currentArchive )
+	if ( !currentArchive || currentArchiveNames.empty() )
 		return;
 
-	QString key = currentArchive->name();
-
-	QStringList files = hash.value( key ).toStringList();
+	QStringList files = hash.value( currentArchiveNames.back() ).toStringList();
 
 	int numRecentFiles = ::updateRecentActions( recentArchiveFileActs, files );
 
 	mRecentArchiveFiles->setEnabled( numRecentFiles > 0 );
+}
+
+QModelIndex NifSkope::currentNifIndex() const
+{
+	QModelIndex index;
+	if ( dList->isVisible() ) {
+		if ( list->model() == proxy ) {
+			index = proxy->mapTo(list->currentIndex());
+		} else if ( list->model() == nif ) {
+			index = list->currentIndex();
+		}
+	} else if ( dTree->isVisible() ) {
+		if ( tree->model() == proxy ) {
+			index = proxy->mapTo(tree->currentIndex());
+		} else if ( tree->model() == nif ) {
+			index = tree->currentIndex();
+		}
+	}
+	return index;
 }
 
 QByteArray fileChecksum( const QString &fileName, QCryptographicHash::Algorithm hashAlgorithm )
@@ -765,33 +805,121 @@ void NifSkope::checkFile( QFileInfo fInfo, QByteArray hash )
 	emit completeSave( saved, fpath );
 }
 
+static bool archiveFilterFunction( [[maybe_unused]] void * p, const std::string_view & s )
+{
+	return ( s.ends_with( ".nif" ) || s.ends_with( ".bto" ) || s.ends_with( ".btr" ) );
+}
+
+bool NifSkope::loadArchivesFromFolder( QString archive )
+{
+	if ( !( archive.endsWith( "/Data", Qt::CaseInsensitive ) || archive.endsWith( "\\Data", Qt::CaseInsensitive ) ) ) {
+		QString	dataDir( archive + "/Data" );
+		if ( QFileInfo( dataDir ).isDir() )
+			archive = dataDir;
+	}
+
+	QStringList	archiveNames;
+	{
+		QDir	archiveDir( archive, QString(), QDir::NoSort, QDir::Files );
+		if ( !archiveDir.exists() ) {
+			qCWarning( nsIo ) << "The archive folder could not be opened.";
+			return false;
+		}
+		archiveDir.setNameFilters( { QString( "*.ba2" ), QString( "*.bsa" ) } );
+		archiveNames = archiveDir.entryList();
+	}
+	for ( qsizetype i = 0; i < archiveNames.size(); ) {
+		QString	archiveName( archiveNames[i].toLower() );
+		static const char *	excludeFilters[6] = { " - faceanimation", " - sounds", " - terrain", " - textures", " - voices", " - wwisesounds" };
+		bool	isExcluded = false;
+		for ( size_t j = 0; j < 6 && !isExcluded; j++ ) {
+			if ( archiveName.contains( excludeFilters[j] ) )
+				isExcluded = true;
+		}
+		if ( isExcluded ) {
+			archiveNames.removeAt( i );
+			continue;
+		}
+		// sort order: 0 = base game archive, 1 = DLC or patch, 2 = mod archive
+		QChar	c( '2' );
+		if ( archiveName == "morrowind.bsa"
+			|| archiveName.startsWith( "oblivion" )
+			|| archiveName.startsWith( "fallout" )
+			|| archiveName.startsWith( "skyrim" )
+			|| archiveName.startsWith( "seventysix" )
+			|| archiveName.startsWith( "starfield" ) ) {
+			if ( archiveName.contains( "update" ) || archiveName.endsWith( "patch.ba2" ) ) {
+				c = '1';
+			} else {
+				c = '0';
+			}
+		} else if ( archiveName.startsWith( "dlc" ) ) {
+			c = '1';
+		}
+		archiveNames[i].insert( 0, c );
+		i++;
+	}
+	if ( archiveNames.empty() )
+		return true;
+	archiveNames.sort( Qt::CaseInsensitive );
+	for ( qsizetype i = archiveNames.size(); i-- > 0; ) {
+		QString	fullPath = archive + archiveNames[i];
+		fullPath[archive.length()] = QChar( '/' );
+		try {
+			size_t	prvCnt = currentArchive->getArchiveFileCnt();
+			currentArchive->loadArchivePath( fullPath.toStdString().c_str(), &archiveFilterFunction );
+			if ( currentArchive->getArchiveFileCnt() > prvCnt )
+				currentArchiveNames += archiveNames[i].mid( 1 );
+		} catch ( std::exception & ) {
+			qCWarning( nsIo ) << QString( "The BSA %1 could not be opened." ).arg( fullPath );
+		}
+	}
+	return true;
+}
+
 void NifSkope::openArchive( const QString & archive )
 {
 	// Clear memory from previously opened archives
 	bsaModel->clear();
-	bsaProxyModel->clear();
+	bsaProxyModel->invalidate();
 	bsaProxyModel->setSourceModel( emptyModel );
 	bsaView->setModel( emptyModel );
 	bsaView->setSortingEnabled( false );
 
-	archiveHandler.reset();
+	if ( currentArchive ) {
+		delete currentArchive;
+		currentArchive = nullptr;
+	}
+	currentArchivePath = archive;
+	currentArchiveNames.clear();
 
-	archiveHandler = FSArchiveHandler::openArchive( archive );
-	if ( !archiveHandler ) {
-		qCWarning( nsIo ) << "The BSA could not be opened.";
-		return;
+	currentArchive = new BA2File();
+	bool	isArchiveFolder = QFileInfo( archive ).isDir();
+	if ( !isArchiveFolder ) {
+		// load single archive
+		try {
+			currentArchive->loadArchivePath( archive.toStdString().c_str(), &archiveFilterFunction );
+		} catch ( std::exception & ) {
+			qCWarning( nsIo ) << "The BSA could not be opened.";
+			clearCurrentArchive();
+			return;
+		}
+	} else {
+		// load all mesh archives from a folder
+		if ( !loadArchivesFromFolder( archive ) ) {
+			clearCurrentArchive();
+			return;
+		}
 	}
 
-	auto bsa = archiveHandler->getArchive<BSA *>();
-	if ( bsa ) {
-
-		setCurrentArchive( bsa );
+	{
+		setCurrentArchive( isArchiveFolder );
 
 		// Models
 		bsaModel->init();
 
 		// Populate model from BSA
-		bsa->fillModel( bsaModel, "meshes" );
+		bsaModel->fillModel( currentArchive, "meshes" );
 
 		if ( bsaModel->rowCount() == 0 ) {
 			qCWarning( nsIo ) << "The BSA does not contain any meshes.";
@@ -814,7 +942,7 @@ void NifSkope::openArchive( const QString & archive )
 		bsaProxyModel->resetFilter();
 
 		// Set filename label
-		ui->bsaName->setText( currentArchive->name() );
+		ui->bsaName->setText( currentArchiveNames.back() );
 
 		ui->bsaFilter->setEnabled( true );
 		ui->bsaFilenameOnly->setEnabled( true );
@@ -837,7 +965,7 @@ void NifSkope::openArchive( const QString & archive )
 				bsaView->collapseAll();
 				bsaProxyModel->resetFilter();
 			}
-				
+
 		} );
 
 		connect( ui->bsaFilenameOnly, &QCheckBox::toggled, bsaProxyModel, &BSAProxyModel::setFilterByNameOnly );
@@ -855,43 +983,49 @@ void NifSkope::openArchiveFile( const QModelIndex & index )
 		openArchiveFileString( currentArchive, filepath );
 }
 
-void NifSkope::openArchiveFileString( BSA * bsa, const QString & filepath )
+void NifSkope::openArchiveFileString( const BA2File * bsa, const QString & filepath )
 {
-	if ( bsa->hasFile( filepath ) ) {
-		if ( !saveConfirm() )
-			return;
+	if ( !currentArchive || currentArchiveNames.empty() )
+		return;
+	std::string	filePathStr( filepath.toLower().toStdString() );
+	auto	fd = currentArchive->findFile( filePathStr );
+	if ( !fd )
+		return;
+	if ( !saveConfirm() )
+		return;
 
-		// Read data from BSA
-		QByteArray data;
-		bsa->fileContents( filepath, data );
+	// Read data from BSA
+	BA2File::UCharArray	data;
+	const unsigned char *	dataPtr;
+	size_t	dataSize = bsa->extractFile( dataPtr, data, filePathStr );
+	QBuffer	buf;
+	buf.setData( reinterpret_cast< const char * >(dataPtr), qsizetype(dataSize) );
 
-		// Format like "BSANAME.BSA/path/to/file.nif"
-		QString path = bsa->name() + "/" + filepath;
+	// Format like "BSANAME.BSA/path/to/file.nif"
+	QString path( currentArchiveNames[std::min( size_t(fd->archiveFile), size_t(currentArchiveNames.size() - 1) )] );
+	path = path + "/" + filepath;
 
-		QBuffer buf;
-		buf.setData( data );
-		if ( buf.open( QBuffer::ReadOnly ) ) {
+	if ( buf.open( QBuffer::ReadOnly ) ) {
 
-			emit beginLoading();
+		emit beginLoading();
 
-			bool loaded = nif->load( buf );
-			if ( loaded )
-				setCurrentFile( path );
+		bool loaded = nif->load( buf );
+		if ( loaded )
+			setCurrentFile( path );
 
-			emit completeLoading( loaded, path );
+		emit completeLoading( loaded, path );
 
-			//if ( loaded ) {
-			//	QCryptographicHash hash( QCryptographicHash::Md5 );
-			//	hash.addData( data );
-			//	filehash = hash.result();
-			//
-			//	QFileInfo f( path );
-			//	
-			//	checkFile( f, filehash );
-			//}
+		//if ( loaded ) {
+		//	QCryptographicHash hash( QCryptographicHash::Md5 );
+		//	hash.addData( data );
+		//	filehash = hash.result();
+		//
+		//	QFileInfo f( path );
+		//
+		//	checkFile( f, filehash );
+		//}
 
-			buf.close();
-		}
+		buf.close();
 	}
 }
 
@@ -965,6 +1099,21 @@ void NifSkope::reload()
 
 void NifSkope::load()
 {
+	{
+		QString	fname = currentFile.toLower().replace('\\', '/');
+		qsizetype	n1 = fname.indexOf(".ba2/");
+		qsizetype	n2 = fname.indexOf(".bsa/");
+		if ( n1 == qsizetype(-1) )
+			n1 = n2;
+		if ( n1 != qsizetype(-1) && currentArchive ) {
+			fname.remove( 0, n1 + 5 );
+			if ( !fname.isEmpty() ) {
+				openArchiveFileString( currentArchive, fname );
+				return;
+			}
+		}
+	}
+
 	emit beginLoading();
 
 	QFileInfo f( QDir::fromNativeSeparators( currentFile ) );
@@ -1124,7 +1273,7 @@ void NifSkope::SetAppLocale( QLocale curLocale )
 			qApp->installTranslator( mTranslator );
 		}
 
-		mTranslator->load( fileName );
+		(void) mTranslator->load( fileName );
 	}
 
 	QLocale::setDefault( QLocale::C );
@@ -1136,7 +1285,7 @@ void NifSkope::sltLocaleChanged()
 
 	QMessageBox mb( "NifSkope",
 	                tr( "NifSkope must be restarted for this setting to take full effect." ),
-	                QMessageBox::Information, QMessageBox::Ok + QMessageBox::Default, 0, 0,
+	                QMessageBox::Information, QMessageBox::Ok | QMessageBox::Default, 0, 0,
 	                qApp->activeWindow()
 	);
 	mb.setIconPixmap( QPixmap( ":/res/nifskope.png" ) );
@@ -1247,40 +1396,6 @@ void NifSkope::migrateSettings() const
 		if ( oldVersion <= NifSkopeVersion( "2.0.dev1" ) ) {
 			qDebug() << "Migrating to new Settings";
 
-			// Sanitize backslashes
-			auto sanitize = []( QVariant oldVal ) {
-				QStringList sanitized;
-				for ( const QString & archive : oldVal.toStringList() ) {
-					if ( archive == "AUTO" ) {
-						sanitized.append( FSManager::autodetectArchives() );
-						continue;
-					}
-
-					sanitized.append( QDir::fromNativeSeparators( archive ) );
-				}
-
-				return sanitized;
-			};
-
-			QVariant foldersVal = settings.value( "Settings/Resources/Folders" );
-			if ( foldersVal.toStringList().isEmpty() ) {
-				QVariant oldVal = settings.value( "Render Settings/Texture Folders" );
-				if ( !oldVal.isNull() ) {
-					settings.setValue( "Settings/Resources/Folders", sanitize( oldVal ) );
-				}
-			}
-
-			QVariant archivesVal = settings.value( "Settings/Resources/Archives" );
-			if ( archivesVal.toStringList().isEmpty() ) {
-				QVariant oldVal = settings.value( "FSEngine/Archives" );
-				if ( !oldVal.isNull() ) {
-					settings.setValue( "Settings/Resources/Archives", sanitize( oldVal ) );
-				}
-			}
-
-			// Update archive handler
-			FSManager::get()->initialize();
-			
 			// Remove old keys
 
 			settings.remove( "FSEngine" );

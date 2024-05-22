@@ -49,20 +49,20 @@ public:
 	Particles( Scene * s, const QModelIndex & b ) : Node( s, b ) {}
 
 	void clear() override;
-	void update( const NifModel * nif, const QModelIndex & ) override;
 	void transform() override;
 
 	void transformShapes() override;
 
-	void drawShapes( NodeList * secondPass = nullptr, bool presort = false ) override;
+	void drawShapes( NodeList * secondPass = nullptr ) override;
 
 	BoundSphere bounds() const override;
 
 protected:
 	void setController( const NifModel * nif, const QModelIndex & controller ) override;
+	void updateImpl( const NifModel * nif, const QModelIndex & index ) override;
 
 	QPersistentModelIndex iData;
-	bool upData = false;
+	bool updateData = false;
 
 	QVector<Vector3> verts;
 	QVector<Color4> colors;

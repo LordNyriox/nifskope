@@ -35,6 +35,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "data/nifvalue.h"
 #include "model/nifmodel.h"
 
+#include "fp32vec4.hpp"
 #include "lib/half.h"
 
 #include <QDataStream>
@@ -63,11 +64,12 @@ void NifIStream::init()
 
 bool NifIStream::read( NifValue & val )
 {
+	if ( val.isCount() )
+		val.val.u64 = 0;
+
 	switch ( val.type() ) {
 	case NifValue::tBool:
 		{
-			val.val.u32 = 0;
-
 			if ( bool32bit )
 				*dataStream >> val.val.u32;
 			else
@@ -77,7 +79,6 @@ bool NifIStream::read( NifValue & val )
 		}
 	case NifValue::tByte:
 		{
-			val.val.u32 = 0;
 			*dataStream >> val.val.u08;
 			return (dataStream->status() == QDataStream::Ok);
 		}
@@ -86,7 +87,6 @@ bool NifIStream::read( NifValue & val )
 	case NifValue::tFlags:
 	case NifValue::tBlockTypeIndex:
 		{
-			val.val.u32 = 0;
 			*dataStream >> val.val.u16;
 			return (dataStream->status() == QDataStream::Ok);
 		}
@@ -109,6 +109,12 @@ bool NifIStream::read( NifValue & val )
 
 			return (dataStream->status() == QDataStream::Ok);
 		}
+	case NifValue::tInt64:
+	case NifValue::tUInt64:
+		{
+			*dataStream >> val.val.u64;
+			return (dataStream->status() == QDataStream::Ok);
+		}
 	case NifValue::tStringIndex:
 		{
 			*dataStream >> val.val.u32;
@@ -126,16 +132,33 @@ bool NifIStream::read( NifValue & val )
 		}
 	case NifValue::tFloat:
 		{
+			val.val.u64 = 0;
 			*dataStream >> val.val.f32;
 			return (dataStream->status() == QDataStream::Ok);
 		}
 	case NifValue::tHfloat:
 		{
+			val.val.u64 = 0;
 			uint16_t half;
 			*dataStream >> half;
+#if ENABLE_X86_64_SIMD >= 3
+			val.val.f32 = FloatVector4::convertFloat16( half )[0];
+#else
 			val.val.u32 = half_to_float( half );
+#endif
 			return (dataStream->status() == QDataStream::Ok);
 		}
+	case NifValue::tNormbyte:
+	{
+		quint8 v;
+		float fv;
+		*dataStream >> v;
+		fv = (double(v) / 255.0) * 2.0 - 1.0;
+		val.val.u64 = 0;
+		val.val.f32 = fv;
+
+		return (dataStream->status() == QDataStream::Ok);
+	}
 	case NifValue::tByteVector3:
 		{
 			quint8 x, y, z;
@@ -154,38 +177,79 @@ bool NifIStream::read( NifValue & val )
 
 			return (dataStream->status() == QDataStream::Ok);
 		}
-	case NifValue::tHalfVector3:
+	case NifValue::tUshortVector3:
 		{
 			uint16_t x, y, z;
-			union { float f; uint32_t i; } xu, yu, zu;
+			float xf, yf, zf;
 
 			*dataStream >> x;
 			*dataStream >> y;
 			*dataStream >> z;
 
+			xf = (float) x;
+			yf = (float) y;
+			zf = (float) z;
+
+			Vector3 * v = static_cast<Vector3 *>(val.val.data);
+			v->xyz[0] = xf; v->xyz[1] = yf; v->xyz[2] = zf;
+
+			return (dataStream->status() == QDataStream::Ok);
+		}
+	case NifValue::tHalfVector3:
+		{
+			Vector3 *	v = static_cast<Vector3 *>(val.val.data);
+#if ENABLE_X86_64_SIMD >= 3
+			uint32_t	xy;
+			uint16_t	z;
+
+			*dataStream >> xy;
+			*dataStream >> z;
+			FloatVector4	xyz_f( FloatVector4::convertFloat16( (uint64_t(z) << 32) | uint64_t(xy) ) );
+
+			v->xyz[0] = xyz_f[0];
+			v->xyz[1] = xyz_f[1];
+			v->xyz[2] = xyz_f[2];
+#else
+			uint16_t	x, y, z;
+
+			*dataStream >> x;
+			*dataStream >> y;
+			*dataStream >> z;
+
+			union { float f; uint32_t i; } xu, yu, zu;
+
 			xu.i = half_to_float( x );
 			yu.i = half_to_float( y );
 			zu.i = half_to_float( z );
 
-			Vector3 * v = static_cast<Vector3 *>(val.val.data);
 			v->xyz[0] = xu.f; v->xyz[1] = yu.f; v->xyz[2] = zu.f;
-
+#endif
 			return (dataStream->status() == QDataStream::Ok);
 		}
 	case NifValue::tHalfVector2:
 		{
-			uint16_t x, y;
-			union { float f; uint32_t i; } xu, yu;
+			Vector2 *	v = static_cast<Vector2 *>(val.val.data);
+#if ENABLE_X86_64_SIMD >= 3
+			uint32_t	xy;
+
+			*dataStream >> xy;
+			FloatVector4	xy_f( FloatVector4::convertFloat16(xy) );
+
+			v->xy[0] = xy_f[0];
+			v->xy[1] = xy_f[1];
+#else
+			uint16_t	x, y;
 
 			*dataStream >> x;
 			*dataStream >> y;
 
+			union { float f; uint32_t i; } xu, yu;
+
 			xu.i = half_to_float( x );
 			yu.i = half_to_float( y );
 
-			Vector2 * v = static_cast<Vector2 *>(val.val.data);
 			v->xy[0] = xu.f; v->xy[1] = yu.f;
-
+#endif
 			return (dataStream->status() == QDataStream::Ok);
 		}
 	case NifValue::tVector3:
@@ -231,15 +295,22 @@ bool NifIStream::read( NifValue & val )
 		return device->read( (char *)static_cast<Color3 *>(val.val.data)->rgb, 12 ) == 12;
 	case NifValue::tByteColor4:
 		{
-			quint8 r, g, b, a;
+			Color4 * c = static_cast<Color4 *>(val.val.data);
+#if ENABLE_X86_64_AVX
+			std::uint32_t	rgba;
+			*dataStream >> rgba;
+			FloatVector4	rgba_f(rgba);
+			rgba_f /= 255.0f;
+			c->setRGBA( rgba_f[0], rgba_f[1], rgba_f[2], rgba_f[3] );
+#else
+			quint8	r, g, b, a;
 			*dataStream >> r;
 			*dataStream >> g;
 			*dataStream >> b;
 			*dataStream >> a;
 
-			Color4 * c = static_cast<Color4 *>(val.val.data);
 			c->setRGBA( (float)r / 255.0, (float)g / 255.0, (float)b / 255.0, (float)a / 255.0 );
-
+#endif
 			return (dataStream->status() == QDataStream::Ok);
 		}
 	case NifValue::tColor4:
@@ -349,8 +420,22 @@ bool NifIStream::read( NifValue & val )
 			if ( c >= 80 )
 				return false;
 
+			quint32 version = 0;
+			// Support NIF versions without "Version" in header string
+			// Do for all files for now
+			//if ( c == GAMEBRYO_FF || c == NETIMMERSE_FF || c == NEOSTEAM_FF ) {
+			device->peek((char *)&version, 4);
+			// NeoSteam Hack
+			if (version == 0x08F35232)
+				version = 0x0A010000;
+			// Version didn't exist until NetImmerse 4.0
+			else if (version < 0x04000000)
+				version = 0;
+			//}
+
 			*static_cast<QString *>(val.val.data) = QString( string );
-			bool x = model->setHeaderString( QString( string ) );
+			bool x = model->setHeaderString( QString( string ), version );
+
 			init();
 			return x;
 		}
@@ -479,6 +564,11 @@ bool NifIStream::read( NifValue & val )
 	return false;
 }
 
+void NifIStream::reset()
+{
+	dataStream->device()->reset();
+}
+
 
 /*
 *  NifOStream
@@ -514,6 +604,9 @@ bool NifOStream::write( const NifValue & val )
 	case NifValue::tULittle32:
 	case NifValue::tStringIndex:
 		return device->write( (char *)&val.val.u32, 4 ) == 4;
+	case NifValue::tInt64:
+	case NifValue::tUInt64:
+		return device->write( (char *)&val.val.u64, 8 ) == 8;
 	case NifValue::tFileVersion:
 		{
 			if ( NifModel * mdl = static_cast<NifModel *>(const_cast<BaseModel *>(model)) ) {
@@ -546,8 +639,18 @@ bool NifOStream::write( const NifValue & val )
 		return device->write( (char *)&val.val.f32, 4 ) == 4;
 	case NifValue::tHfloat:
 		{
-			uint16_t half = half_from_float( val.val.u32 );
+#if ENABLE_X86_64_SIMD >= 3
+			uint16_t	half = uint16_t( FloatVector4( val.val.f32 ).convertToFloat16() );
+#else
+			uint16_t	half = half_from_float( val.val.u32 );
+#endif
 			return device->write( (char *)&half, 2 ) == 2;
+		}
+	case NifValue::tNormbyte:
+		{
+			uint8_t v = round( ((val.val.f32 + 1.0) / 2.0) * 255.0 );
+
+			return device->write( (char*)&v, 1 ) == 1;
 		}
 	case NifValue::tByteVector3:
 		{
@@ -562,24 +665,41 @@ bool NifOStream::write( const NifValue & val )
 
 			return device->write( (char*)v, 3 ) == 3;
 		}
+	case NifValue::tUshortVector3:
+		{
+			Vector3 * vec = static_cast<Vector3 *>(val.val.data);
+			if ( !vec )
+				return false;
+
+			uint16_t v[3];
+			v[0] = (uint16_t) round(vec->xyz[0]);
+			v[1] = (uint16_t) round(vec->xyz[1]);
+			v[2] = (uint16_t) round(vec->xyz[2]);
+
+			return device->write( (char*)v, 6 ) == 6;
+		}
 	case NifValue::tHalfVector3:
 		{
 			Vector3 * vec = static_cast<Vector3 *>(val.val.data);
 			if ( !vec )
 				return false;
 
+#if ENABLE_X86_64_SIMD >= 3
+			uint64_t	xyz = FloatVector4( vec->xyz[0], vec->xyz[1], vec->xyz[2], 0.0f ).convertToFloat16();
+			return device->write( (char*) &xyz, 6 ) == 6;
+#else
+			uint16_t	v[3];
 			union { float f; uint32_t i; } xu, yu, zu;
 
 			xu.f = vec->xyz[0];
 			yu.f = vec->xyz[1];
 			zu.f = vec->xyz[2];
 
-			uint16_t v[3];
 			v[0] = half_from_float( xu.i );
 			v[1] = half_from_float( yu.i );
 			v[2] = half_from_float( zu.i );
-
 			return device->write( (char*)v, 6 ) == 6;
+#endif
 		}
 	case NifValue::tHalfVector2:
 		{
@@ -587,16 +707,20 @@ bool NifOStream::write( const NifValue & val )
 			if ( !vec )
 				return false;
 
+#if ENABLE_X86_64_SIMD >= 3
+			uint64_t	xy = FloatVector4( vec->xy[0], vec->xy[1], 0.0f, 0.0f ).convertToFloat16();
+			return device->write( (char*) &xy, 4 ) == 4;
+#else
+			uint16_t	v[2];
 			union { float f; uint32_t i; } xu, yu;
 
 			xu.f = vec->xy[0];
 			yu.f = vec->xy[1];
 
-			uint16_t v[2];
 			v[0] = half_from_float( xu.i );
 			v[1] = half_from_float( yu.i );
-
 			return device->write( (char*)v, 4 ) == 4;
+#endif
 		}
 	case NifValue::tVector3:
 		return device->write( (char *)static_cast<Vector3 *>(val.val.data)->xyz, 12 ) == 12;
@@ -625,13 +749,17 @@ bool NifOStream::write( const NifValue & val )
 			if ( !color )
 				return false;
 
-			quint8 c[4];
+#if ENABLE_X86_64_AVX
+			uint32_t	c[1];
+			c[0] = std::uint32_t( FloatVector4( color->rgba[0], color->rgba[1], color->rgba[2], color->rgba[3] ) * 255.0f );
+#else
+			quint8	c[4];
 
 			auto cF = color->rgba;
 			for ( int i = 0; i < 4; i++ ) {
 				c[i] = round( cF[i] * 255.0f );
 			}
-
+#endif
 			return device->write( (char*)c, 4 ) == 4;
 		}
 	case NifValue::tColor4:
@@ -811,6 +939,7 @@ int NifSStream::size( const NifValue & val )
 			return 1;
 
 	case NifValue::tByte:
+	case NifValue::tNormbyte:
 		return 1;
 	case NifValue::tWord:
 	case NifValue::tShort:
@@ -827,6 +956,9 @@ int NifSStream::size( const NifValue & val )
 	case NifValue::tUpLink:
 	case NifValue::tFloat:
 		return 4;
+	case NifValue::tInt64:
+	case NifValue::tUInt64:
+		return 8;
 	case NifValue::tHfloat:
 		return 2;
 	case NifValue::tByteVector3:
@@ -927,6 +1059,7 @@ int NifSStream::size( const NifValue & val )
 		return 0;
 
 	case NifValue::tNone:
+	default:
 		return 0;
 	}
 

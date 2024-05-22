@@ -31,11 +31,14 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ***** END LICENCE BLOCK *****/
 
 #include "gltexloaders.h"
+#include "gltex.h"
 
 #include "message.h"
 #include "model/nifmodel.h"
 
 #include "dds.h"
+#include "libfo76utils/src/pbr_lut.hpp"
+#include "libfo76utils/src/sfcube2.hpp"
 
 #include <QBuffer>
 #include <QByteArray>
@@ -72,18 +75,19 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
 
-bool extInitialized = false;
-bool extSupported = true;
-bool extStorageSupported = true;
-
+static bool extInitialized = false;
 
 #ifndef __APPLE__
 // OpenGL 4.2
-PFNGLTEXSTORAGE2DPROC glTexStorage2D = nullptr;
-#ifdef _WIN32
-PFNGLCOMPRESSEDTEXSUBIMAGE2DPROC glCompressedTexSubImage2D = nullptr;
-PFNGLCOMPRESSEDTEXIMAGE2DPROC glCompressedTexImage2D = nullptr;
+static PFNGLTEXSTORAGE2DPROC glTexStorage2D = nullptr;
+static bool extStorageSupported = true;
+#else
+static bool extStorageSupported = false;
 #endif
+
+#ifdef Q_OS_WIN32
+static PFNGLCOMPRESSEDTEXSUBIMAGE2DPROC glCompressedTexSubImage2D = nullptr;
+static PFNGLCOMPRESSEDTEXIMAGE2DPROC glCompressedTexImage2D = nullptr;
 #endif
 
 #define FOURCC_DXT1 MAKEFOURCC( 'D', 'X', 'T', '1' )
@@ -436,13 +440,13 @@ int texLoadPal( QIODevice & f, int width, int height, int num_mipmaps, int bpp, 
 #define TGA_GREY_RLE     11
 
 //! Load a TGA texture.
-GLuint texLoadTGA( QIODevice & f, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint & id )
+GLuint texLoadTGA( QIODevice & f, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint * id )
 {
 	// see http://en.wikipedia.org/wiki/Truevision_TGA for a lot of this
 	texformat = "TGA";
 	target = GL_TEXTURE_2D;
 
-	glBindTexture( target, id );
+	glBindTexture( target, id[0] );
 
 	// read in tga header
 	quint8 hdr[18];
@@ -577,7 +581,7 @@ quint16 get16( quint8 * x )
 }
 
 //! Load a BMP texture.
-GLuint texLoadBMP( QIODevice & f, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint & id )
+GLuint texLoadBMP( QIODevice & f, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint * id )
 {
 	// read in bmp header
 	quint8 hdr[54];
@@ -589,7 +593,7 @@ GLuint texLoadBMP( QIODevice & f, QString & texformat, GLenum & target, GLuint &
 	texformat = "BMP";
 	target = GL_TEXTURE_2D;
 
-	glBindTexture( target, id );
+	glBindTexture( target, id[0] );
 
 	width  = get32( &hdr[18] );
 	height = get32( &hdr[22] );
@@ -623,29 +627,35 @@ GLuint texLoadBMP( QIODevice & f, QString & texformat, GLenum & target, GLuint &
 	return 0;
 }
 
-GLuint texLoadDDS( const QString & filepath, QString & format, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, QByteArray & data, GLuint & id )
+GLuint texLoadDDS( const QString & filepath, GLenum & target, GLuint & mipmaps, QByteArray & data, GLuint * id )
 {
+	if ( data.size() < 128 )
+		return 0;
+
 	GLuint result = 0;
 	gli::texture texture;
 	if ( extStorageSupported ) {
 		texture = load_if_valid( data.constData(), data.size() );
 		if ( !texture.empty() )
 			result = GLI_create_texture( texture, target, id );
+#ifdef Q_OS_WIN32
 	} else if ( glCompressedTexImage2D ) {
+#else
+	} else {
+#endif
 		texture = load_if_valid( data.constData(), data.size() );
 		if ( !texture.empty() )
 			result = GLI_create_texture_fallback( texture, target, id );
 	}
 
 	if ( result ) {
-		id = result;
+		id[0] = result;
 		mipmaps = (GLuint)texture.levels();
 	} else {
 		mipmaps = 0;
 		QString file = filepath;
-		file.replace( '/', "\\" );
 		Message::append( "One or more textures failed to load.",
-						 QString( "'%1' is corrupt or unsupported." ).arg( file )
+							QString( "'%1' is corrupt or unsupported." ).arg( file )
 		);
 	}
 
@@ -655,18 +665,121 @@ GLuint texLoadDDS( const QString & filepath, QString & format, GLenum & target, 
 	return mipmaps;
 }
 
+static SFCubeMapCache	sfCubeMapCache;
+
+GLuint texLoadPBRCubeMap( const Game::GameMode game, const QString & filepath, GLenum & target, GLuint & mipmaps, QByteArray & data, GLuint * id )
+{
+	if ( data.size() < 148 )
+		return 0;
+
+	const unsigned char *	dataPtr = reinterpret_cast< unsigned char * >( data.data() );
+	bool	filterDisabled = false;
+	do {
+		if ( FileBuffer::readUInt64Fast( dataPtr ) == 0x4E41494441523F23ULL ) {	// "#?RADIAN"
+			sfCubeMapCache.setNormalizeLevel( 0.25f );
+			if ( game != Game::FALLOUT_76 )
+				break;
+			for ( size_t i = 0; i <= 144; i++ ) {
+				std::uint32_t	tmp = FileBuffer::readUInt32Fast( dataPtr + i );
+				if ( tmp == 0x20592B0A || tmp == 0x20592D0A ) {	// "\n+Y " or "\n-Y "
+					// invert Y axis
+					data.data()[i + 1] = char( ((tmp >> 8) & 0xFF) ^ 6 );
+					break;
+				}
+			}
+			break;
+		}
+		if ( FileBuffer::readUInt32Fast( dataPtr ) == 0x20534444 ) {	// "DDS "
+			// DDSCAPS2_CUBEMAP, "DX10"
+			if ( (dataPtr[113] & 0x02) && FileBuffer::readUInt32Fast( dataPtr + 84 ) == 0x30315844 ) {
+				// DXGI_FORMAT_R9G9B9E5_SHAREDEXP with mipmaps:
+				// assume the texture is already pre-filtered
+				filterDisabled = ( dataPtr[128] == 0x43 && dataPtr[28] >= 2 );
+				sfCubeMapCache.setNormalizeLevel( 1.0f / 12.5f );
+				break;
+			}
+		}
+		return 0;
+	} while ( false );
+
+	if ( !filterDisabled ) {
+		std::uint32_t	width = std::uint32_t( TexCache::pbrCubeMapResolution );
+		sfCubeMapCache.setRoughnessTable( nullptr, 7 );
+		sfCubeMapCache.setImportanceSamplingThreshold( !( width & 1 ) ? 0.125f : 0.0f );
+		width = width & ~1U;
+		size_t	dataSize = size_t( data.size() );
+		size_t	spaceRequired = width * width * 8 * 4 + 148;
+		if ( data.size() < qsizetype(spaceRequired) )
+			data.resize( spaceRequired );
+		size_t	newSize = sfCubeMapCache.convertImage( reinterpret_cast< unsigned char * >(data.data()), dataSize, true, spaceRequired, width );
+		data.resize( newSize );
+	}
+
+	{
+		// generate and load second cube map for diffuse lighting
+		std::uint32_t	width = 32;
+		QByteArray	tmpData( data );
+		size_t	dataSize = size_t( tmpData.size() );
+		size_t	spaceRequired = width * width * 8 * 4 + 148;
+		if ( tmpData.size() < qsizetype(spaceRequired) )
+			tmpData.resize( spaceRequired );
+		static const float  roughnessDiffuse = 1.0f;
+		sfCubeMapCache.setRoughnessTable( &roughnessDiffuse, 1 );
+		size_t	newSize = sfCubeMapCache.convertImage( reinterpret_cast< unsigned char * >(tmpData.data()), dataSize, true, spaceRequired, width );
+		tmpData.resize( newSize );
+		GLuint	tmpMipmaps = 0;
+		(void) texLoadDDS( filepath, target, tmpMipmaps, tmpData, id + 1 );
+	}
+
+	return texLoadDDS( filepath, target, mipmaps, data, id );
+}
+
+bool texLoadColor( const Game::GameMode game, const QString & filepath, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, QByteArray & data, GLuint * id )
+{
+	// generate 1x1 texture from an RGBA color in "#AABBGGRR" format
+	QChar	c;
+	if ( filepath.length() >= 10 )
+		c = filepath.back().toLower();
+	bool	isCubeMap = ( c == 'c' );
+	std::uint32_t	color = 0;
+	for ( int i = 1; i < 9; i++ ) {
+		color = color << 4;
+		unsigned short	tmp = filepath.at( i ).toLower().unicode();
+		color = color | ( ( tmp + ( (tmp >> 6) * 9 ) ) & 0x0F );
+	}
+	width = 1;
+	height = 1;
+	int	n = ( !isCubeMap ? 1 : 6 );
+	data.resize( n * 4 + 148 );
+	unsigned char	dxgiFmt = 0x1C;		// DXGI_FORMAT_R8G8B8A8_UNORM
+	if ( c == 's' || c == 'c' ) {
+		dxgiFmt = 0x1D;					// DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+	} else if ( c == 'n' ) {
+		dxgiFmt = 0x1F;					// DXGI_FORMAT_R8G8B8A8_SNORM
+		color = color ^ 0x80808080U;
+	}
+	unsigned char *	dataPtr = reinterpret_cast< unsigned char * >( data.data() );
+	(void) FileBuffer::writeDDSHeader( dataPtr, dxgiFmt, 1, 1, 1, isCubeMap );
+	for ( int i = 0; i < n; i++ )
+		FileBuffer::writeUInt32Fast( dataPtr + ( 148 + (i << 2) ), color );
+
+	if ( isCubeMap && ( game == Game::FALLOUT_76 || game == Game::STARFIELD ) )
+		return bool( texLoadPBRCubeMap( game, filepath, target, mipmaps, data, id ) );
+	return bool( texLoadDDS( filepath, target, mipmaps, data, id ) );
+}
+
 // (public function, documented in gltexloaders.h)
-bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, GLuint & id )
+bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, GLuint * id )
 {
 	bool ok = false;
-	const NifModel * nif = qobject_cast<const NifModel *>( iData.model() );
 
-	if ( nif && iData.isValid() ) {
+	auto nif = NifModel::fromValidIndex(iData);
+	if ( nif ) {
 		mipmaps = nif->get<uint>( iData, "Num Mipmaps" );
 		QModelIndex iMipmaps = nif->getIndex( iData, "Mipmaps" );
 
 		if ( mipmaps > 0 && iMipmaps.isValid() ) {
-			QModelIndex iMipmap = iMipmaps.child( 0, 0 );
+			QModelIndex iMipmap = QModelIndex_child( iMipmaps );
 			width  = nif->get<uint>( iMipmap, "Width" );
 			height = nif->get<uint>( iMipmap, "Height" );
 		}
@@ -683,7 +796,7 @@ bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, G
 		QModelIndex iPixelData = nif->getIndex( iData, "Pixel Data" );
 
 		if ( iPixelData.isValid() ) {
-			if ( QByteArray * pdata = nif->get<QByteArray *>( iPixelData.child(0, 0) ) ) {
+			if ( QByteArray * pdata = nif->get<QByteArray *>( QModelIndex_child( iPixelData ) ) ) {
 				buf.setData( *pdata );
 				buf.open( QIODevice::ReadOnly );
 				buf.seek( 0 );
@@ -707,7 +820,7 @@ bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, G
 
 			if ( iChannels.isValid() ) {
 				for ( int i = 0; i < 4; i++ ) {
-					QModelIndex iChannel = iChannels.child( i, 0 );
+					QModelIndex iChannel = QModelIndex_child( iChannels, i );
 					uint type = nif->get<uint>( iChannel, "Type" );
 					uint bpc  = nif->get<uint>( iChannel, "Bits Per Channel" );
 					int m = (1 << bpc) - 1;
@@ -759,7 +872,7 @@ bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, G
 			{
 				texformat += " (PAL8)";
 				// Read the NiPalette entries; change this if we change NiPalette in nif.xml
-				QModelIndex iPalette = nif->getBlock( nif->getLink( iData, "Palette" ) );
+				QModelIndex iPalette = nif->getBlockIndex( nif->getLink( iData, "Palette" ) );
 
 				if ( iPalette.isValid() ) {
 					QVector<quint32> map;
@@ -769,7 +882,7 @@ bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, G
 
 					if ( nmap > 0 && iPaletteArray.isValid() ) {
 						for ( uint i = 0; i < nmap; ++i ) {
-							auto color = nif->get<ByteColor4>( iPaletteArray.child( i, 0 ) ).toQColor();
+							auto color = nif->get<ByteColor4>( QModelIndex_child( iPaletteArray, i ) ).toQColor();
 							quint8 r = color.red();
 							quint8 g = color.green();
 							quint8 b = color.blue();
@@ -807,8 +920,8 @@ bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, G
 			buf.buffer().prepend( QByteArray::fromRawData( dds, sizeof( hdr ) ) );
 			buf.buffer().prepend( QByteArray::fromStdString( "DDS " ) );
 
-			mipmaps = texLoadDDS( QString( "[%1] NiPixelData" ).arg( nif->getBlockNumber( iData ) ), 
-								  texformat, target, width, height, mipmaps, buf.buffer(), id );
+			mipmaps = texLoadDDS( QString( "[%1] NiPixelData" ).arg( nif->getBlockNumber( iData ) ),
+									target, mipmaps, buf.buffer(), id );
 
 			ok = (mipmaps > 0);
 		}
@@ -818,12 +931,12 @@ bool texLoad( const QModelIndex & iData, QString & texformat, GLenum & target, G
 }
 
 //! Load NiPixelData or NiPersistentSrcTextureRendererData from a NifModel
-GLuint texLoadNIF( QIODevice & f, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint & id )
+GLuint texLoadNIF( QIODevice & f, QString & texformat, GLenum & target, GLuint & width, GLuint & height, GLuint * id )
 {
 	GLuint mipmaps = 0;
 	target = GL_TEXTURE_2D;
 
-	glBindTexture( target, id );
+	glBindTexture( target, id[0] );
 
 	NifModel pix;
 
@@ -833,7 +946,7 @@ GLuint texLoadNIF( QIODevice & f, QString & texformat, GLenum & target, GLuint &
 	QPersistentModelIndex iRoot;
 
 	for ( const auto l : pix.getRootLinks() ) {
-		QModelIndex iData = pix.getBlock( l, "NiPixelFormat" );
+		QModelIndex iData = pix.getBlockIndex( l, "NiPixelFormat" );
 
 		if ( !iData.isValid() || iData == QModelIndex() )
 			throw QString( "this is not a normal .nif file; there should be only pixel data as root blocks" );
@@ -850,20 +963,22 @@ void initializeTextureLoaders( const QOpenGLContext * context )
 	if ( !extInitialized ) {
 #ifndef __APPLE__
 		glTexStorage2D = (PFNGLTEXSTORAGE2DPROC)context->getProcAddress( "glTexStorage2D" );
-#ifdef _WIN32
+		if ( !glTexStorage2D )
+			extStorageSupported = false;
+#endif
+#ifdef Q_OS_WIN32
 		glCompressedTexSubImage2D = (PFNGLCOMPRESSEDTEXSUBIMAGE2DPROC)context->getProcAddress( "glCompressedTexSubImage2D" );
 		glCompressedTexImage2D = (PFNGLCOMPRESSEDTEXIMAGE2DPROC)context->getProcAddress( "glCompressedTexImage2D" );
-#endif
-#endif
-		if ( !glTexStorage2D || !glCompressedTexSubImage2D )
+		if ( !glCompressedTexSubImage2D )
 			extStorageSupported = false;
+#endif
 
 		extInitialized = true;
 	}
 }
 
 //! Create texture with glTexStorage2D using GLI
-GLuint GLI_create_texture( gli::texture& texture, GLenum& target, GLuint& id )
+GLuint GLI_create_texture( gli::texture& texture, GLenum& target, GLuint * id )
 {
 	if ( !extStorageSupported )
 		return 0;
@@ -872,15 +987,22 @@ GLuint GLI_create_texture( gli::texture& texture, GLenum& target, GLuint& id )
 	gli::gl::format const format = glProfile.translate( texture.format(), texture.swizzles() );
 	target = glProfile.translate( texture.target() );
 
-	if ( !id )
-		glGenTextures( 1, &id );
-	glBindTexture( target, id );
+	if ( !id[0] )
+		glGenTextures( 1, id );
+	glBindTexture( target, id[0] );
 	glTexParameteri( target, GL_TEXTURE_BASE_LEVEL, 0 );
 	glTexParameteri( target, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(texture.levels() - 1) );
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, format.Swizzles[0] );
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, format.Swizzles[1] );
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, format.Swizzles[2] );
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, format.Swizzles[3] );
+	if ( gli::component_count(texture.format()) == 1 ) {
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, format.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, format.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, format.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, GL_ONE );
+	} else {
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, format.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, format.Swizzles[1] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, format.Swizzles[2] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, format.Swizzles[3] );
+	}
 
 	glm::tvec3<GLsizei> const textureExtent( texture.extent() );
 
@@ -926,11 +1048,11 @@ GLuint GLI_create_texture( gli::texture& texture, GLenum& target, GLuint& id )
 		}
 	}
 
-	return id;
+	return id[0];
 }
 
 //! Fallback for systems that do not have glTexStorage2D
-GLuint GLI_create_texture_fallback( gli::texture& texture, GLenum & target, GLuint& id )
+GLuint GLI_create_texture_fallback( gli::texture& texture, GLenum & target, GLuint * id )
 {
 	if ( texture.empty() )
 		return 0;
@@ -939,17 +1061,24 @@ GLuint GLI_create_texture_fallback( gli::texture& texture, GLenum & target, GLui
 	gli::gl::format const fmt = GL.translate( texture.format(), texture.swizzles() );
 	target = GL.translate( texture.target() );
 
-	if ( !id )
-		glGenTextures( 1, &id );
-	glBindTexture( target, id );
+	if ( !id[0] )
+		glGenTextures( 1, id );
+	glBindTexture( target, id[0] );
 	// Base and max level are not supported by OpenGL ES 2.0
 	glTexParameteri( target, GL_TEXTURE_BASE_LEVEL, 0 );
 	glTexParameteri( target, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(texture.levels() - 1) );
 	// Texture swizzle is not supported by OpenGL ES 2.0 and OpenGL 3.2
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, fmt.Swizzles[0] );
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, fmt.Swizzles[1] );
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, fmt.Swizzles[2] );
-	glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, fmt.Swizzles[3] );
+	if ( gli::component_count(texture.format()) == 1 ) {
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, fmt.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, fmt.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, fmt.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, GL_ONE );
+	} else {
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, fmt.Swizzles[0] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, fmt.Swizzles[1] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, fmt.Swizzles[2] );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, fmt.Swizzles[3] );
+	}
 
 	for ( std::size_t layer = 0; layer < texture.layers(); ++layer )
 	for ( std::size_t face = 0; face < texture.faces(); ++face )
@@ -960,7 +1089,7 @@ GLuint GLI_create_texture_fallback( gli::texture& texture, GLenum & target, GLui
 		case gli::TARGET_CUBE:
 			if ( gli::is_compressed( texture.format() ) )
 				glCompressedTexImage2D(
-					gli::is_target_cube( texture.target() ) ? static_cast<GLenum>(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face) 
+					gli::is_target_cube( texture.target() ) ? static_cast<GLenum>(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face)
 					: target,
 					static_cast<GLint>(level),
 					fmt.Internal,
@@ -983,7 +1112,7 @@ GLuint GLI_create_texture_fallback( gli::texture& texture, GLenum & target, GLui
 			return 0;
 		}
 	}
-	return id;
+	return id[0];
 }
 
 //! Rewrite of gli::load_dds to not crash on invalid textures
@@ -1008,8 +1137,8 @@ gli::texture load_if_valid( const char * data, unsigned int size )
 
 	dx DX;
 
-	format Format( static_cast<format>(FORMAT_INVALID) );
-	if ( (Header.Format.flags & (dx::DDPF_RGB | dx::DDPF_ALPHAPIXELS | dx::DDPF_ALPHA | dx::DDPF_YUV | dx::DDPF_LUMINANCE)) && Format == static_cast<format>(gli::FORMAT_INVALID) && Header.Format.bpp != 0 ) {
+	format Format( static_cast<format>(FORMAT_UNDEFINED) );
+	if ( (Header.Format.flags & (dx::DDPF_RGB | dx::DDPF_ALPHAPIXELS | dx::DDPF_ALPHA | dx::DDPF_YUV | dx::DDPF_LUMINANCE)) && Format == static_cast<format>(gli::FORMAT_UNDEFINED) && Header.Format.bpp != 0 ) {
 		switch ( Header.Format.bpp ) {
 		default:
 			break;
@@ -1080,13 +1209,13 @@ gli::texture load_if_valid( const char * data, unsigned int size )
 				break;
 			}
 		}
-	} else if ( (Header.Format.flags & dx::DDPF_FOURCC) && (Header.Format.fourCC != dx::D3DFMT_DX10) && (Header.Format.fourCC != dx::D3DFMT_GLI1) && (Format == static_cast<format>(gli::FORMAT_INVALID)) ) {
+	} else if ( (Header.Format.flags & dx::DDPF_FOURCC) && (Header.Format.fourCC != dx::D3DFMT_DX10) && (Header.Format.fourCC != dx::D3DFMT_GLI1) && (Format == static_cast<format>(gli::FORMAT_UNDEFINED)) ) {
 		dx::d3dfmt const FourCC = remap_four_cc( Header.Format.fourCC );
 		Format = DX.find( FourCC );
 	} else if ( Header.Format.fourCC == dx::D3DFMT_DX10 || Header.Format.fourCC == dx::D3DFMT_GLI1 )
 		Format = DX.find( Header.Format.fourCC, Header10.Format );
 
-	if ( Format == static_cast<format>(FORMAT_INVALID) )
+	if ( Format == static_cast<format>(FORMAT_UNDEFINED) )
 		return texture();
 
 	size_t const MipMapCount = (Header.Flags & DDSD_MIPMAPCOUNT) ? Header.MipMapLevels : 1;
@@ -1113,46 +1242,76 @@ gli::texture load_if_valid( const char * data, unsigned int size )
 }
 
 
-bool texLoad( const QString & filepath, QString & format, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, GLuint & id)
+bool texLoad( const Game::GameMode game, const QString & filepath, QString & format, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, GLuint * id)
 {
-	return texLoad( filepath, format, target, width, height, mipmaps, *(new QByteArray()), id );
+	QByteArray	tmp;
+	return texLoad( game, filepath, format, target, width, height, mipmaps, tmp, id );
 }
 
-bool texLoad( const QString & filepath, QString & format, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, QByteArray & data, GLuint & id )
+static void extract_pbr_lut_data( QByteArray & data )
+{
+	static QByteArray	pbrLUTData;
+	if ( pbrLUTData.isEmpty() ) {
+		SF_PBR_Tables	pbrLUT( 512, 4096 );
+		pbrLUTData.resize( qsizetype( pbrLUT.getImageData().size() ) );
+		std::memcpy( pbrLUTData.data(), pbrLUT.getImageData().data(), pbrLUT.getImageData().size() );
+	}
+	data = pbrLUTData;
+}
+
+bool texLoad( const Game::GameMode game, const QString & filepath, QString & format, GLenum & target, GLuint & width, GLuint & height, GLuint & mipmaps, QByteArray & data, GLuint * id )
 {
 	width = height = mipmaps = 0;
 
 	if ( data.isEmpty() ) {
-		QFile tmpF( filepath );
-
-		if ( !tmpF.open( QIODevice::ReadOnly ) )
+		if ( filepath.startsWith('#') && (filepath.length() == 9 || filepath.length() == 10) ) {
+			if ( filepath == "#sfpbr.dds" )
+				extract_pbr_lut_data( data );
+			else
+				return texLoadColor( game, filepath, target, width, height, mipmaps, data, id );
+		} else if ( !Game::GameManager::get_file(data, game, filepath, "textures", "") ) {
 			throw QString( "could not open file" );
-
-		data = tmpF.readAll();
-
-		tmpF.close();
+		}
 
 		if ( data.isEmpty() )
 			return false;
 	}
 
-	QBuffer f( &data );
-	if ( !f.open( QIODevice::ReadWrite ) )
-		throw QString( "could not open buffer" );
-
 	bool isSupported = true;
-	if ( filepath.endsWith( ".dds", Qt::CaseInsensitive ) )
-		mipmaps = texLoadDDS( filepath, format, target, width, height, mipmaps, data, id );
-	else if ( filepath.endsWith( ".tga", Qt::CaseInsensitive ) )
-		mipmaps = texLoadTGA( f, format, target, width, height, id );
-	else if ( filepath.endsWith( ".bmp", Qt::CaseInsensitive ) )
-		mipmaps = texLoadBMP( f, format, target, width, height, id );
-	else if ( filepath.endsWith( ".nif", Qt::CaseInsensitive ) || filepath.endsWith( ".texcache", Qt::CaseInsensitive ) )
-		mipmaps = texLoadNIF( f, format, target, width, height, id );
-	else
-		isSupported = false;
-	
-	f.close();
+	if ( filepath.endsWith( ".dds", Qt::CaseInsensitive ) || ( filepath.endsWith( ".hdr", Qt::CaseInsensitive ) && ( game == Game::FALLOUT_76 || game == Game::STARFIELD ) ) ) {
+		bool	isCubeMap = false;
+		if ( data.size() >= 148 ) {
+			if ( FileBuffer::readUInt32Fast( data.data() ) == 0x20534444 ) {	// "DDS "
+				if ( data.data()[113] & 0x02 ) {	// DDSCAPS2_CUBEMAP
+					isCubeMap = true;
+					if ( game == Game::FALLOUT_76 && FileBuffer::readUInt32Fast( data.data() + 84 ) == 0x30315844 && data.data()[128] == 0x57 )
+						data[128] = 0x5B;	// DXGI_FORMAT_B8G8R8A8_UNORM -> DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+				}
+			} else if ( FileBuffer::readUInt64Fast( data.data() ) == 0x4E41494441523F23ULL ) {	// "#?RADIAN"
+				isCubeMap = true;
+			}
+		}
+		if ( isCubeMap && ( game == Game::FALLOUT_76 || game == Game::STARFIELD ) ) {
+			mipmaps = texLoadPBRCubeMap( game, filepath, target, mipmaps, data, id );
+		} else {
+			mipmaps = texLoadDDS( filepath, target, mipmaps, data, id );
+		}
+	} else {
+		QBuffer f( &data );
+		if ( !f.open( QIODevice::ReadWrite ) )
+			throw QString( "could not open buffer" );
+
+		if ( filepath.endsWith( ".tga", Qt::CaseInsensitive ) )
+			mipmaps = texLoadTGA( f, format, target, width, height, id );
+		else if ( filepath.endsWith( ".bmp", Qt::CaseInsensitive ) )
+			mipmaps = texLoadBMP( f, format, target, width, height, id );
+		else if ( filepath.endsWith( ".nif", Qt::CaseInsensitive ) || filepath.endsWith( ".texcache", Qt::CaseInsensitive ) )
+			mipmaps = texLoadNIF( f, format, target, width, height, id );
+		else
+			isSupported = false;
+
+		f.close();
+	}
 	data.clear();
 
 	if ( mipmaps == 0 )
@@ -1175,9 +1334,8 @@ bool texLoad( const QString & filepath, QString & format, GLenum & target, GLuin
 	// Power of Two check
 	if ( (width & (width - 1)) || (height & (height - 1)) ) {
 		QString file = filepath;
-		file.replace( '/', "\\" );
 		Message::append( "One or more texture dimensions are not a power of two.",
-						 QString( "'%1' is %2 x %3." ).arg( file ).arg( width ).arg( height )
+							QString( "'%1' is %2 x %3." ).arg( file ).arg( width ).arg( height )
 		);
 	}
 
@@ -1186,11 +1344,13 @@ bool texLoad( const QString & filepath, QString & format, GLenum & target, GLuin
 
 bool texIsSupported( const QString & filepath )
 {
-	return (filepath.endsWith( ".dds", Qt::CaseInsensitive )
-			 || filepath.endsWith( ".tga", Qt::CaseInsensitive )
-			 || filepath.endsWith( ".bmp", Qt::CaseInsensitive )
-			 || filepath.endsWith( ".nif", Qt::CaseInsensitive )
-			 || filepath.endsWith( ".texcache", Qt::CaseInsensitive )
+	return ( filepath.endsWith( ".dds", Qt::CaseInsensitive )
+					|| ( filepath.startsWith( "#" ) && ( filepath.length() == 9 || filepath.length() == 10 ) )
+					|| filepath.endsWith( ".tga", Qt::CaseInsensitive )
+					|| filepath.endsWith( ".bmp", Qt::CaseInsensitive )
+					|| filepath.endsWith( ".nif", Qt::CaseInsensitive )
+					|| filepath.endsWith( ".texcache", Qt::CaseInsensitive )
+					|| filepath.endsWith( ".hdr", Qt::CaseInsensitive )
 	);
 }
 
@@ -1203,7 +1363,7 @@ bool texCanLoad( const QString & filepath )
 
 bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLuint & width, const GLuint & height, const GLuint & mipmaps )
 {
-	const NifModel * nif = qobject_cast<const NifModel *>( index.model() );
+	auto nif = NifModel::fromIndex( index );
 	quint32 format = nif->get<quint32>( index, "Pixel Format" );
 
 	// can't dump palettised textures yet
@@ -1219,7 +1379,7 @@ bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLui
 	QModelIndex iPixelData = nif->getIndex( index, "Pixel Data" );
 
 	if ( iPixelData.isValid() ) {
-		if ( QByteArray * pdata = nif->get<QByteArray *>( iPixelData.child( 0, 0 ) ) ) {
+		if ( QByteArray * pdata = nif->get<QByteArray *>( QModelIndex_child( iPixelData ) ) ) {
 			buf.setData( *pdata );
 			buf.open( QIODevice::ReadOnly );
 			buf.seek( 0 );
@@ -1263,9 +1423,9 @@ bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLui
 
 	// header flags
 	header[pos++] = ( 1 << 0 )                       // caps = 1
-	                | ( 1 << 1 )                     // height = 1
-	                | ( 1 << 2 )                     // width = 1
-	                | ( (compressed ? 0 : 1) << 3 ); // pitch, and 4 bits reserved
+									| ( 1 << 1 )                     // height = 1
+									| ( 1 << 2 )                     // width = 1
+									| ( (compressed ? 0 : 1) << 3 ); // pitch, and 4 bits reserved
 
 	header[pos++] = ( 1 << 4 );                      // 4 bits reserved, pixelformat = 1, 3 bits reserved
 
@@ -1274,7 +1434,7 @@ bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLui
 	bool hasMipMaps = ( mipmaps > 1 );
 
 	header[pos++] = ( (hasMipMaps ? 1 : 0) << 1 )    // 1 bit reserved, mipmapcount
-	                | ( (compressed ? 1 : 0) << 3 ); // 1 bit reserved, linearsize, 3 bits reserved, depth = 0
+									| ( (compressed ? 1 : 0) << 3 ); // 1 bit reserved, linearsize, 3 bits reserved, depth = 0
 
 	pos++;
 
@@ -1331,9 +1491,9 @@ bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLui
 	// pixel format flags
 	bool alphapixels = (format == 1 );             //|| format == 5 || format == 6);
 	header[pos] = ( (alphapixels ? 1 : 0) << 0 )   // alpha pixels
-	              | ( (alphapixels ? 1 : 0) << 1 ) // alpha
-	              | ( (compressed ? 1 : 0) << 2 )  // fourcc
-	              | ( (compressed ? 0 : 1) << 6 ); // rgb
+								| ( (alphapixels ? 1 : 0) << 1 ) // alpha
+								| ( (compressed ? 1 : 0) << 2 )  // fourcc
+								| ( (compressed ? 0 : 1) << 6 ); // rgb
 	pos += 4;
 
 	// pixel format fourcc
@@ -1399,7 +1559,7 @@ bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLui
 
 		if ( iChannels.isValid() ) {
 			for ( int i = 0; i < 4; i++ ) {
-				QModelIndex iChannel = iChannels.child( i, 0 );
+				QModelIndex iChannel = QModelIndex_child( iChannels, i );
 				uint type = nif->get<uint>( iChannel, "Type" );
 				uint bpc  = nif->get<uint>( iChannel, "Bits Per Channel" );
 				int m = (1 << bpc) - 1;
@@ -1425,7 +1585,7 @@ bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLui
 	/*
 	if ( alphapixels )
 	{
-	    mask[3] = 0xff000000;
+		mask[3] = 0xff000000;
 	}*/
 
 	// red mask
@@ -1469,7 +1629,7 @@ bool texSaveDDS( const QModelIndex & index, const QString & filepath, const GLui
 bool texSaveTGA( const QModelIndex & index, const QString & filepath, const GLuint & width, const GLuint & height )
 {
 	Q_UNUSED( index );
-	//const NifModel * nif = qobject_cast<const NifModel *>( index.model() );
+	// auto nif = NifModel::fromIndex(index);
 	QString filename = filepath;
 
 	if ( !filename.toLower().endsWith( ".tga" ) )
@@ -1490,10 +1650,10 @@ bool texSaveTGA( const QModelIndex & index, const QString & filepath, const GLui
 	// It also won't work with DXT compressed or palletised textures
 	/*
 	if( nif->get<quint32>( index, "Pixel Format" ) == 0 ) {
-	    glGetTexImage( GL_TEXTURE_2D, 0, GL_BGR, GL_UNSIGNED_BYTE, data );
+		glGetTexImage( GL_TEXTURE_2D, 0, GL_BGR, GL_UNSIGNED_BYTE, data );
 	}
 	else if( nif->get<quint32>( index, "Pixel Format") == 1 ) {
-	    glGetTexImage( GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, data );
+		glGetTexImage( GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, data );
 	}*/
 
 	glGetTexImage( GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixl );
@@ -1501,10 +1661,10 @@ bool texSaveTGA( const QModelIndex & index, const QString & filepath, const GLui
 	//quint32 mask[4] = { 0x00000000, 0x00000000, 0x00000000, 0x00000000 };
 	/*
 	if ( nif->getVersionNumber() < 0x14000004 ) {
-	    mask[0] = nif->get<uint>(index, "Blue Mask");
-	    mask[1] = nif->get<uint>(index, "Green Mask");
-	    mask[2] = nif->get<uint>(index, "Red Mask");
-	    mask[3] = nif->get<uint>(index, "Alpha Mask");
+		mask[0] = nif->get<uint>(index, "Blue Mask");
+		mask[1] = nif->get<uint>(index, "Green Mask");
+		mask[2] = nif->get<uint>(index, "Red Mask");
+		mask[3] = nif->get<uint>(index, "Alpha Mask");
 	}
 	*/
 
@@ -1578,7 +1738,7 @@ bool texSaveTGA( const QModelIndex & index, const QString & filepath, const GLui
 }
 
 
-bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
+bool texSaveNIF( const Game::GameMode game, NifModel * nif, const QString & filepath, QModelIndex & iData )
 {
 	// Work out the extension and format
 	// If DDS raw, DXT1 or DXT5, copy directly from texture
@@ -1598,7 +1758,7 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 
 		// possibly update this to ATextureRenderData...
 		QPersistentModelIndex iPixData;
-		iPixData = pix.getBlock( 0, "NiPixelData" );
+		iPixData = pix.getBlockIndex( 0, "NiPixelData" );
 
 		if ( !iPixData.isValid() )
 			throw QString( "Texture .nifs should only have NiPixelData blocks" );
@@ -1617,7 +1777,7 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 			QModelIndex fastCompareDest = nif->getIndex( iData, "Old Fast Compare" );
 
 			for ( int i = 0; i < pix.rowCount( fastCompareSrc ); i++ ) {
-				nif->set<quint8>( fastCompareDest.child( i, 0 ), pix.get<quint8>( fastCompareSrc.child( i, 0 ) ) );
+				nif->set<quint8>( QModelIndex_child( fastCompareDest, i ), pix.get<quint8>( QModelIndex_child( fastCompareSrc, i ) ) );
 			}
 
 			if ( nif->checkVersion( 0x0A010000, 0x0A020000 ) && pix.checkVersion( 0x0A010000, 0x0A020000 ) ) {
@@ -1640,15 +1800,15 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 			// copy channels
 			for ( int i = 0; i < 4; i++ ) {
 				qDebug() << "Channel" << i;
-				qDebug() << pix.get<quint32>( srcChannels.child( i, 0 ), "Type" );
-				qDebug() << pix.get<quint32>( srcChannels.child( i, 0 ), "Convention" );
-				qDebug() << pix.get<quint8>( srcChannels.child( i, 0 ), "Bits Per Channel" );
-				qDebug() << pix.get<quint8>( srcChannels.child( i, 0 ), "Is Signed" );
+				qDebug() << pix.get<quint32>( QModelIndex_child( srcChannels, i ), "Type" );
+				qDebug() << pix.get<quint32>( QModelIndex_child( srcChannels, i ), "Convention" );
+				qDebug() << pix.get<quint8>( QModelIndex_child( srcChannels, i ), "Bits Per Channel" );
+				qDebug() << pix.get<quint8>( QModelIndex_child( srcChannels, i ), "Is Signed" );
 
-				nif->set<quint32>( destChannels.child( i, 0 ), "Type", pix.get<quint32>( srcChannels.child( i, 0 ), "Type" ) );
-				nif->set<quint32>( destChannels.child( i, 0 ), "Convention", pix.get<quint32>( srcChannels.child( i, 0 ), "Convention" ) );
-				nif->set<quint8>( destChannels.child( i, 0 ), "Bits Per Channel", pix.get<quint8>( srcChannels.child( i, 0 ), "Bits Per Channel" ) );
-				nif->set<quint8>( destChannels.child( i, 0 ), "Is Signed", pix.get<quint8>( srcChannels.child( i, 0 ), "Is Signed" ) );
+				nif->set<quint32>( QModelIndex_child( destChannels, i ), "Type", pix.get<quint32>( QModelIndex_child( srcChannels, i ), "Type" ) );
+				nif->set<quint32>( QModelIndex_child( destChannels, i ), "Convention", pix.get<quint32>( QModelIndex_child( srcChannels, i ), "Convention" ) );
+				nif->set<quint8>( QModelIndex_child( destChannels, i ), "Bits Per Channel", pix.get<quint8>( QModelIndex_child( srcChannels, i ), "Bits Per Channel" ) );
+				nif->set<quint8>( QModelIndex_child( destChannels, i ), "Is Signed", pix.get<quint8>( QModelIndex_child( srcChannels, i ), "Is Signed" ) );
 			}
 
 			nif->set<quint32>( iData, "Num Faces", pix.get<quint32>( iPixData, "Num Faces" ) );
@@ -1660,8 +1820,8 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 		// ignore palette for now; what uses these? theoretically they don't exist past 4.2.2.0
 
 /*
-        <add name="Palette" type="Ref" template="NiPalette">Link to NiPalette, for 8-bit textures.</add>
-    </niobject>
+		<add name="Palette" type="Ref" template="NiPalette">Link to NiPalette, for 8-bit textures.</add>
+		</niobject>
 */
 
 		nif->set<quint32>( iData, "Num Mipmaps", pix.get<quint32>( iPixData, "Num Mipmaps" ) );
@@ -1669,12 +1829,12 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 
 		QModelIndex srcMipMaps  = pix.getIndex( iPixData, "Mipmaps" );
 		QModelIndex destMipMaps = nif->getIndex( iData, "Mipmaps" );
-		nif->updateArray( destMipMaps );
+		nif->updateArraySize( destMipMaps );
 
 		for ( int i = 0; i < pix.rowCount( srcMipMaps ); i++ ) {
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Width", pix.get<quint32>( srcMipMaps.child( i, 0 ), "Width" ) );
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Height", pix.get<quint32>( srcMipMaps.child( i, 0 ), "Height" ) );
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Offset", pix.get<quint32>( srcMipMaps.child( i, 0 ), "Offset" ) );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Width", pix.get<quint32>( QModelIndex_child( srcMipMaps, i ), "Width" ) );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Height", pix.get<quint32>( QModelIndex_child( srcMipMaps, i ), "Height" ) );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Offset", pix.get<quint32>( QModelIndex_child( srcMipMaps, i ), "Offset" ) );
 		}
 
 		nif->set<quint32>( iData, "Num Pixels", pix.get<quint32>( iPixData, "Num Pixels" ) );
@@ -1683,8 +1843,8 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 		QModelIndex destPixelData = nif->getIndex( iData, "Pixel Data" );
 
 		for ( int i = 0; i < pix.rowCount( srcPixelData ); i++ ) {
-			nif->updateArray( destPixelData.child( i, 0 ) );
-			nif->set<QByteArray>( destPixelData.child( i, 0 ), "Pixel Data", pix.get<QByteArray>( srcPixelData.child( i, 0 ), "Pixel Data" ) );
+			nif->updateArraySize( QModelIndex_child( destPixelData, i ) );
+			nif->set<QByteArray>( QModelIndex_child( destPixelData, i ), "Pixel Data", pix.get<QByteArray>( QModelIndex_child( srcPixelData, i ), "Pixel Data" ) );
 		}
 
 		//nif->set<>( iData, "", pix.get<>( iPixData, "" ) );
@@ -1692,12 +1852,15 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 	} else if ( filepath.endsWith( ".bmp", Qt::CaseInsensitive ) || filepath.endsWith( ".tga", Qt::CaseInsensitive ) ) {
 		//qDebug() << "Copying from GL buffer";
 
-		GLuint width, height, mipmaps, id;
+		GLuint width, height, mipmaps;
 		GLuint target = GL_TEXTURE_2D;
 		QString format;
+		GLuint id[2];
+		id[0] = 0;
+		id[1] = 0;
 
 		// fastest way to get parameters and ensure texture is active
-		if ( texLoad( filepath, format, target, width, height, mipmaps, id ) ) {
+		if ( texLoad( game, filepath, format, target, width, height, mipmaps, id ) ) {
 			//qDebug() << "Width" << width << "height" << height << "mipmaps" << mipmaps << "format" << format;
 		} else {
 			qCCritical( nsIo ) << QObject::tr( "Error importing %1" ).arg( filepath );
@@ -1718,7 +1881,7 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 			QModelIndex oldFastCompare = nif->getIndex( iData, "Old Fast Compare" );
 
 			for ( int i = 0; i < 8; i++ ) {
-				nif->set<quint8>( oldFastCompare.child( i, 0 ), unk8bytes32[i] );
+				nif->set<quint8>( QModelIndex_child( oldFastCompare, i ), unk8bytes32[i] );
 			}
 		} else if ( nif->checkVersion( 0x14000004, 0 ) ) {
 			// set stuff
@@ -1727,17 +1890,17 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 			QModelIndex destChannels = nif->getIndex( iData, "Channels" );
 
 			for ( int i = 0; i < 4; i++ ) {
-				nif->set<quint32>( destChannels.child( i, 0 ), "Type", i );       // red, green, blue, alpha
-				nif->set<quint32>( destChannels.child( i, 0 ), "Convention", 0 ); // fixed
-				nif->set<quint8>( destChannels.child( i, 0 ), "Bits Per Channel", 8 );
-				nif->set<quint8>( destChannels.child( i, 0 ), "Is Signed", 0 );
+				nif->set<quint32>( QModelIndex_child( destChannels, i ), "Type", i );       // red, green, blue, alpha
+				nif->set<quint32>( QModelIndex_child( destChannels, i ), "Convention", 0 ); // fixed
+				nif->set<quint8>( QModelIndex_child( destChannels, i ), "Bits Per Channel", 8 );
+				nif->set<quint8>( QModelIndex_child( destChannels, i ), "Is Signed", 0 );
 			}
 		}
 
 		nif->set<quint32>( iData, "Num Mipmaps", mipmaps );
 		nif->set<quint32>( iData, "Bytes Per Pixel", 4 );
 		QModelIndex destMipMaps = nif->getIndex( iData, "Mipmaps" );
-		nif->updateArray( destMipMaps );
+		nif->updateArraySize( destMipMaps );
 
 		QByteArray pixelData;
 
@@ -1747,9 +1910,9 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 
 		// generate sizes and copy mipmap to NIF
 		for ( uint i = 0; i < mipmaps; i++ ) {
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Width", mipmapWidth );
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Height", mipmapHeight );
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Offset", mipmapOffset );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Width", mipmapWidth );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Height", mipmapHeight );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Offset", mipmapOffset );
 
 			quint32 mipmapSize = mipmapWidth * mipmapHeight * 4;
 
@@ -1773,7 +1936,7 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 		nif->set<quint32>( iData, "Num Pixels", mipmapOffset );
 
 		QModelIndex iPixelData = nif->getIndex( iData, "Pixel Data" );
-		nif->updateArray( iPixelData );
+		nif->updateArraySize( iPixelData );
 
 		nif->set<QByteArray>( iPixelData, "Pixel Data", pixelData );
 
@@ -1847,9 +2010,9 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 
 			for ( int i = 0; i < 8; i++ ) {
 				if ( ddsHeader.ddspf.dwRGBBitCount == 24 ) {
-					nif->set<quint8>( oldFastCompare.child( i, 0 ), unk8bytes24[i] );
+					nif->set<quint8>( QModelIndex_child( oldFastCompare, i ), unk8bytes24[i] );
 				} else if ( ddsHeader.ddspf.dwRGBBitCount == 32 ) {
-					nif->set<quint8>( oldFastCompare.child( i, 0 ), unk8bytes32[i] );
+					nif->set<quint8>( QModelIndex_child( oldFastCompare, i ), unk8bytes32[i] );
 				}
 			}
 		} else if ( nif->checkVersion( 0x14000004, 0 ) ) {
@@ -1865,15 +2028,15 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 
 				for ( int i = 0; i < 4; i++ ) {
 					if ( i == 0 ) {
-						nif->set<quint32>( destChannels.child( i, 0 ), "Type", 4 );       // compressed
-						nif->set<quint32>( destChannels.child( i, 0 ), "Convention", 4 ); // compressed
+						nif->set<quint32>( QModelIndex_child( destChannels, i ), "Type", 4 );       // compressed
+						nif->set<quint32>( QModelIndex_child( destChannels, i ), "Convention", 4 ); // compressed
 					} else {
-						nif->set<quint32>( destChannels.child( i, 0 ), "Type", 19 );      // empty
-						nif->set<quint32>( destChannels.child( i, 0 ), "Convention", 5 ); // empty
+						nif->set<quint32>( QModelIndex_child( destChannels, i ), "Type", 19 );      // empty
+						nif->set<quint32>( QModelIndex_child( destChannels, i ), "Convention", 5 ); // empty
 					}
 
-					nif->set<quint8>( destChannels.child( i, 0 ), "Bits Per Channel", 0 );
-					nif->set<quint8>( destChannels.child( i, 0 ), "Is Signed", 1 );
+					nif->set<quint8>( QModelIndex_child( destChannels, i ), "Bits Per Channel", 0 );
+					nif->set<quint8>( QModelIndex_child( destChannels, i ), "Is Signed", 1 );
 				}
 			} else {
 				nif->set<uint>( iData, "Bits Per Pixel", ddsHeader.ddspf.dwRGBBitCount );
@@ -1882,32 +2045,32 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 				for ( int i = 0; i < 3; i++ ) {
 					if ( ddsHeader.ddspf.dwRBitMask == RGBA_INV_MASK[i] ) {
 						//qDebug() << "red channel" << i;
-						nif->set<quint32>( destChannels.child( i, 0 ), "Type", 0 );
+						nif->set<quint32>( QModelIndex_child( destChannels, i ), "Type", 0 );
 					} else if ( ddsHeader.ddspf.dwGBitMask == RGBA_INV_MASK[i] ) {
 						//qDebug() << "green channel" << i;
-						nif->set<quint32>( destChannels.child( i, 0 ), "Type", 1 );
+						nif->set<quint32>( QModelIndex_child( destChannels, i ), "Type", 1 );
 					} else if ( ddsHeader.ddspf.dwBBitMask == RGBA_INV_MASK[i] ) {
 						//qDebug() << "blue channel" << i;
-						nif->set<quint32>( destChannels.child( i, 0 ), "Type", 2 );
+						nif->set<quint32>( QModelIndex_child( destChannels, i ), "Type", 2 );
 					}
 				}
 
 				for ( int i = 0; i < 3; i++ ) {
-					nif->set<quint32>( destChannels.child( i, 0 ), "Convention", 0 ); // fixed
-					nif->set<quint8>( destChannels.child( i, 0 ), "Bits Per Channel", 8 );
-					nif->set<quint8>( destChannels.child( i, 0 ), "Is Signed", 0 );
+					nif->set<quint32>( QModelIndex_child( destChannels, i ), "Convention", 0 ); // fixed
+					nif->set<quint8>( QModelIndex_child( destChannels, i ), "Bits Per Channel", 8 );
+					nif->set<quint8>( QModelIndex_child( destChannels, i ), "Is Signed", 0 );
 				}
 
 				if ( ddsHeader.ddspf.dwRGBBitCount == 32 ) {
-					nif->set<quint32>( destChannels.child( 3, 0 ), "Type", 3 );       // alpha
-					nif->set<quint32>( destChannels.child( 3, 0 ), "Convention", 0 ); // fixed
-					nif->set<quint8>( destChannels.child( 3, 0 ), "Bits Per Channel", 8 );
-					nif->set<quint8>( destChannels.child( 3, 0 ), "Is Signed", 0 );
+					nif->set<quint32>( QModelIndex_child( destChannels, 3 ), "Type", 3 );       // alpha
+					nif->set<quint32>( QModelIndex_child( destChannels, 3 ), "Convention", 0 ); // fixed
+					nif->set<quint8>( QModelIndex_child( destChannels, 3 ), "Bits Per Channel", 8 );
+					nif->set<quint8>( QModelIndex_child( destChannels, 3 ), "Is Signed", 0 );
 				} else if ( ddsHeader.ddspf.dwRGBBitCount == 24 ) {
-					nif->set<quint32>( destChannels.child( 3, 0 ), "Type", 19 );      // empty
-					nif->set<quint32>( destChannels.child( 3, 0 ), "Convention", 5 ); // empty
-					nif->set<quint8>( destChannels.child( 3, 0 ), "Bits Per Channel", 0 );
-					nif->set<quint8>( destChannels.child( 3, 0 ), "Is Signed", 0 );
+					nif->set<quint32>( QModelIndex_child( destChannels, 3 ), "Type", 19 );      // empty
+					nif->set<quint32>( QModelIndex_child( destChannels, 3 ), "Convention", 5 ); // empty
+					nif->set<quint8>( QModelIndex_child( destChannels, 3 ), "Bits Per Channel", 0 );
+					nif->set<quint8>( QModelIndex_child( destChannels, 3 ), "Is Signed", 0 );
 				}
 			}
 		}
@@ -1916,7 +2079,7 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 		//qDebug() << "Mipmap count: " << ddsHeader.dwMipMapCount;
 		nif->set<quint32>( iData, "Num Mipmaps", ddsHeader.dwMipMapCount );
 		QModelIndex destMipMaps = nif->getIndex( iData, "Mipmaps" );
-		nif->updateArray( destMipMaps );
+		nif->updateArraySize( destMipMaps );
 
 		nif->set<quint32>( iData, "Bytes Per Pixel", ddsHeader.ddspf.dwRGBBitCount / 8 );
 
@@ -1925,9 +2088,9 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 		int mipmapOffset = 0;
 
 		for ( quint32 i = 0; i < ddsHeader.dwMipMapCount; i++ ) {
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Width", mipmapWidth );
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Height", mipmapHeight );
-			nif->set<quint32>( destMipMaps.child( i, 0 ), "Offset", mipmapOffset );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Width", mipmapWidth );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Height", mipmapHeight );
+			nif->set<quint32>( QModelIndex_child( destMipMaps, i ), "Offset", mipmapOffset );
 
 			if ( ddsHeader.ddspf.dwFlags & DDS_FOURCC ) {
 				if ( ddsHeader.ddspf.dwFourCC == FOURCC_DXT1 ) {
@@ -1950,7 +2113,7 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 		// finally, copy the data...
 
 		QModelIndex iPixelData = nif->getIndex( iData, "Pixel Data" );
-		nif->updateArray( iPixelData );
+		nif->updateArraySize( iPixelData );
 
 		f.seek( 4 + ddsHeader.dwSize );
 		//qDebug() << "Reading from " << f.pos();
@@ -1969,7 +2132,7 @@ bool texSaveNIF( NifModel * nif, const QString & filepath, QModelIndex & iData )
 		QByteArray result = nif->get<QByteArray>( iFaceData, "Pixel Data" );
 		for ( int i = 0; i < 16; i++ )
 		{
-		    qDebug() << "Comparing byte " << i << ": result " << (quint8)result[i] << ", original " << (quint8)ddsData[i];
+			qDebug() << "Comparing byte " << i << ": result " << (quint8)result[i] << ", original " << (quint8)ddsData[i];
 		}
 		*/
 

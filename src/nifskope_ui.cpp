@@ -51,6 +51,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ui/widgets/xmlcheck.h"
 #include "ui/about_dialog.h"
 #include "ui/settingsdialog.h"
+#include "gamemanager.h"
 
 #include <QAction>
 #include <QApplication>
@@ -143,12 +144,15 @@ void NifSkope::initActions()
 	aSelectFont = ui->aSelectFont;
 
 	// Build all actions list
-	allActions = QSet<QAction *>::fromList( 
-		ui->tFile->actions() 
-		<< ui->mRender->actions()
-		<< ui->tRender->actions()
-		<< ui->tAnim->actions()
-	);
+	allActions = QSet<QAction *>();
+	for ( auto i : ui->tFile->actions() )
+		allActions.insert( i );
+	for ( auto i : ui->mRender->actions() )
+		allActions.insert( i );
+	for ( auto i : ui->tRender->actions() )
+		allActions.insert( i );
+	for ( auto i : ui->tAnim->actions() )
+		allActions.insert( i );
 
 	// Undo/Redo
 	undoAction = nif->undoStack->createUndoAction( this, tr( "&Undo" ) );
@@ -182,13 +186,16 @@ void NifSkope::initActions()
 	ui->aWindow->setShortcut( QKeySequence::New );
 
 	connect( ui->aBrowseArchive, &QAction::triggered, this, &NifSkope::archiveDlg );
+	connect( ui->aBrowseGameFolder, &QAction::triggered, this, &NifSkope::archiveFolderDlg );
 	connect( ui->aOpen, &QAction::triggered, this, &NifSkope::openDlg );
-	connect( ui->aSave, &QAction::triggered, this, &NifSkope::save );  
+	connect( ui->aSave, &QAction::triggered, this, &NifSkope::save );
 	connect( ui->aSaveAs, &QAction::triggered, this, &NifSkope::saveAsDlg );
+
+	ui->aReload->setDisabled(true);
 
 	// TODO: Assure Actions and Scene state are synced
 	// Set Data for Actions to pass onto Scene when clicking
-	/*	
+	/*
 		ShowAxes = 0x1,
 		ShowGrid = 0x2,
 		ShowNodes = 0x4,
@@ -315,7 +322,7 @@ void NifSkope::initActions()
 			ogl->setDebugMode( GLView::DbgColorPicker );
 		else
 			ogl->setDebugMode( GLView::DbgNone );
-		
+
 		ogl->update();
 	} );
 
@@ -391,6 +398,22 @@ void NifSkope::initDockWidgets()
 	dInsp->setVisible( false );
 	dKfm->setVisible( false );
 
+	ui->menuShow->addAction(dList->toggleViewAction());
+	ui->menuShow->addAction(dTree->toggleViewAction());
+	ui->menuShow->addAction(dHeader->toggleViewAction());
+	ui->menuShow->addAction(dBrowser->toggleViewAction());
+	ui->menuShow->addAction(dInsp->toggleViewAction());
+	ui->menuShow->addAction(dKfm->toggleViewAction());
+	ui->menuShow->addAction(dRefr->toggleViewAction());
+
+	ui->tView->addAction(dList->toggleViewAction());
+	ui->tView->addAction(dTree->toggleViewAction());
+	ui->tView->addAction(dHeader->toggleViewAction());
+	ui->tView->addAction(dBrowser->toggleViewAction());
+	ui->tView->addAction(dInsp->toggleViewAction());
+	ui->tView->addAction(dKfm->toggleViewAction());
+	ui->tView->addAction(dRefr->toggleViewAction());
+
 	// Set Inspect widget
 	dInsp->setWidget( inspect );
 
@@ -420,8 +443,8 @@ void NifSkope::initMenu()
 	mImport = ui->menuImport;
 
 	fillImportExportMenus();
-	connect( mExport, &QMenu::triggered, this, &NifSkope::sltImportExport );
-	connect( mImport, &QMenu::triggered, this, &NifSkope::sltImportExport );
+	connect( mExport, &QMenu::triggered, this, &NifSkope::sltExport );
+	connect( mImport, &QMenu::triggered, this, &NifSkope::sltImport );
 
 	// BSA Recent Files
 	mRecentArchiveFiles = new QMenu( this );
@@ -501,7 +524,7 @@ void NifSkope::initMenu()
 
 	QActionGroup * grpTheme = new QActionGroup( this );
 
-	// Fill the action data with the integer correlating to 
+	// Fill the action data with the integer correlating to
 	// their position in WindowTheme and add to the action group.
 	int i = 0;
 	auto themes = ui->mTheme->actions();
@@ -521,7 +544,7 @@ void NifSkope::initToolBars()
 	// Status Bar
 	ui->statusbar->setContentsMargins( 0, 0, 0, 0 );
 	ui->statusbar->addPermanentWidget( progress );
-	
+
 	// TODO: Split off into own widget
 	ui->statusbar->addPermanentWidget( filePathWidget( this ) );
 
@@ -575,7 +598,7 @@ void NifSkope::initToolBars()
 	connect( animSlider, &FloatSlider::valueChanged, animSliderEdit, &FloatEdit::setValue );
 	connect( animSliderEdit, static_cast<void (FloatEdit::*)(float)>(&FloatEdit::sigEdited), ogl, &GLView::setSceneTime );
 	connect( animSliderEdit, static_cast<void (FloatEdit::*)(float)>(&FloatEdit::sigEdited), animSlider, &FloatSlider::setValue );
-	
+
 	// Animations
 	animGroups = new QComboBox( ui->tAnim );
 	animGroups->setMinimumWidth( 60 );
@@ -608,13 +631,18 @@ void NifSkope::initToolBars()
 		}
 	} );
 
+	connect ( ogl->scene, &Scene::disableSave, [this]() {
+		ui->aSave->setDisabled(true);
+		ui->aSaveAs->setDisabled(true);
+		ui->aReload->setDisabled(true);
+	} );
 
 	// LOD Toolbar
 	QToolBar * tLOD = ui->tLOD;
 
-	QSettings settings;
-	int lodLevel = settings.value( "GLView/LOD Level", 2 ).toInt();
-	settings.setValue( "GLView/LOD Level", lodLevel );
+	//QSettings settings;
+	//int lodLevel = settings.value( "GLView/LOD Level", 0 ).toInt();
+	//settings.setValue( "GLView/LOD Level", lodLevel );
 
 	QSlider * lodSlider = new QSlider( Qt::Horizontal );
 	lodSlider->setFocusPolicy( Qt::StrongFocus );
@@ -622,8 +650,8 @@ void NifSkope::initToolBars()
 	lodSlider->setTickInterval( 1 );
 	lodSlider->setSingleStep( 1 );
 	lodSlider->setMinimum( 0 );
-	lodSlider->setMaximum( 2 );
-	lodSlider->setValue( lodLevel );
+	lodSlider->setMaximum( 3 );
+	lodSlider->setValue(0);
 
 	tLOD->addWidget( lodSlider );
 	tLOD->setEnabled( false );
@@ -650,7 +678,7 @@ QMenu * NifSkope::lightingWidget()
 {
 	QMenu * mLight = new QMenu( this );
 	mLight->setObjectName( "mLight" );
-	
+
 
 	auto lightingWidget = new LightingWidget( ogl, mLight );
 	lightingWidget->setActions( {ui->aLighting, ui->aTextures, ui->aVertexColors,
@@ -735,6 +763,20 @@ void NifSkope::archiveDlg()
 		openArchive( file );
 }
 
+void NifSkope::archiveFolderDlg()
+{
+	QString path = QFileDialog::getExistingDirectory( this, tr( "Open Game or Archive Folder" ), "" );
+	if ( path.isEmpty() )
+		return;
+	if ( path.endsWith( "/Data", Qt::CaseInsensitive ) || path.endsWith( "\\Data", Qt::CaseInsensitive ) ) {
+		QString	parentDir( path );
+		parentDir.truncate( parentDir.length() - 5 );
+		if ( !parentDir.isEmpty() && QFileInfo( parentDir ).isDir() )
+			path = parentDir;
+	}
+	openArchive( path );
+}
+
 void NifSkope::openDlg()
 {
 	// Grab most recent filepath if blank window
@@ -770,16 +812,8 @@ void NifSkope::onLoadComplete( bool success, QString & fname )
 {
 	QApplication::restoreOverrideCursor();
 
-	if ( nif && nif->getVersionNumber() >= 0x14050000 ) {
-		mExport->setDisabled( true );
-		mImport->setDisabled( true );
-	} else {
-		mExport->setDisabled( false );
-		if ( nif->getUserVersion2() >= 100 )
-			mImport->setDisabled( true );
-		else
-			mImport->setDisabled( false );
-	}
+	updateImportExportMenu(mExport);
+	updateImportExportMenu(mImport);
 
 	// Reconnect the models to the views
 	swapModels();
@@ -791,16 +825,20 @@ void NifSkope::onLoadComplete( bool success, QString & fname )
 	ogl->setEnabled( true );
 	setEnabled( true ); // IMPORTANT!
 
+	ui->aSave->setDisabled(false);
+	ui->aSaveAs->setDisabled(false);
+	ui->aReload->setDisabled(false);
+
 	int timeout = 2500;
 	if ( success ) {
 		// Scroll panel back to top
 		tree->scrollTo( nif->index( 0, 0 ) );
 
-		select( nif->getHeader() );
+		select( nif->getHeaderIndex() );
 
-		header->setRootIndex( nif->getHeader() );
+		header->setRootIndex( nif->getHeaderIndex() );
 		// Refresh the header rows
-		header->updateConditions( nif->getHeader().child( 0, 0 ), nif->getHeader().child( 20, 0 ) );
+		header->updateConditions( QModelIndex_child( nif->getHeaderIndex() ), QModelIndex_child( nif->getHeaderIndex(), 20 ) );
 
 		ogl->setOrientation( GLView::ViewFront );
 
@@ -808,7 +846,7 @@ void NifSkope::onLoadComplete( bool success, QString & fname )
 
 	} else {
 		// File failed to load
-		Message::append( this, NifModel::tr( readFail ), 
+		Message::append( this, NifModel::tr( readFail ),
 						 NifModel::tr( readFailFinal ).arg( fname ), QMessageBox::Critical );
 
 		nif->clear();
@@ -831,6 +869,9 @@ void NifSkope::onLoadComplete( bool success, QString & fname )
 
 	// Center the model on load
 	ogl->center();
+
+	// Expand the top level of Block List tree
+	ui->list->expandToDepth(0);
 
 	// Hide Progress Bar
 	QTimer::singleShot( timeout, progress, SLOT( hide() ) );
@@ -896,6 +937,7 @@ void NifSkope::enableUi()
 	ui->aSaveMenu->setEnabled( true );
 	ui->aSave->setEnabled( true );
 	ui->aSaveAs->setEnabled( true );
+	ui->aReload->setEnabled( true );
 	ui->aHeader->setEnabled( true );
 
 	ui->mRender->setEnabled( true );
@@ -1001,13 +1043,13 @@ void NifSkope::setViewFont( const QFont & font )
 {
 	list->setFont( font );
 	QFontMetrics metrics( list->font() );
-	list->setIconSize( QSize( metrics.width( "000" ), metrics.lineSpacing() ) );
+	list->setIconSize( QSize( metrics.horizontalAdvance( "000" ), metrics.lineSpacing() ) );
 	tree->setFont( font );
-	tree->setIconSize( QSize( metrics.width( "000" ), metrics.lineSpacing() ) );
+	tree->setIconSize( QSize( metrics.horizontalAdvance( "000" ), metrics.lineSpacing() ) );
 	header->setFont( font );
-	header->setIconSize( QSize( metrics.width( "000" ), metrics.lineSpacing() ) );
+	header->setIconSize( QSize( metrics.horizontalAdvance( "000" ), metrics.lineSpacing() ) );
 	kfmtree->setFont( font );
-	kfmtree->setIconSize( QSize( metrics.width( "000" ), metrics.lineSpacing() ) );
+	kfmtree->setIconSize( QSize( metrics.horizontalAdvance( "000" ), metrics.lineSpacing() ) );
 	ogl->setFont( font );
 }
 
@@ -1096,7 +1138,7 @@ void NifSkope::loadTheme()
 	pal.setColor( QPalette::ColorGroup::Disabled, QPalette::HighlightedText, baseCTxtHighlightDark );
 
 	// Set Palette and Stylesheet
-	
+
 	QDir qssDir( QApplication::applicationDirPath() );
 	QStringList qssList( QStringList()
 						 << "style.qss"
@@ -1355,6 +1397,19 @@ void NifSkope::overrideViewFont()
 */
 
 
+void NifSkope::on_aCloseArchives_triggered()
+{
+	Game::GameManager::close_archives( true );
+}
+
+void NifSkope::on_aUpdateView_triggered()
+{
+	ogl->flush();
+	ogl->updateShaders();
+	emit ogl->getScene()->sceneUpdated();
+	ogl->updateScene();
+}
+
 void NifSkope::on_aLoadXML_triggered()
 {
 	NifModel::loadXML();
@@ -1396,7 +1451,7 @@ void NifSkope::on_aHeader_triggered()
 	if ( tree )
 		tree->clearRootIndex();
 
-	select( nif->getHeader() );
+	select( nif->getHeaderIndex() );
 }
 
 
@@ -1451,7 +1506,7 @@ void NifSkope::on_aViewWalk_triggered( bool checked )
 
 
 void NifSkope::on_aViewUserSave_triggered( bool checked )
-{ 
+{
 	Q_UNUSED( checked );
 	ogl->saveUserView();
 	ui->aViewUser->setChecked( true );

@@ -8,6 +8,7 @@
 #include <QLayout>
 #include <QPushButton>
 
+#include "gamemanager.h"
 
 // Brief description is deliberately not autolinked to class Spell
 /*! \file normals.cpp
@@ -25,21 +26,21 @@ public:
 
 	static QModelIndex getShapeData( const NifModel * nif, const QModelIndex & index )
 	{
-		QModelIndex iData = nif->getBlock( index );
+		QModelIndex iData = nif->getBlockIndex( index );
 
 		if ( nif->isNiBlock( index, { "NiTriShape", "BSLODTriShape", "NiTriStrips" } ) )
-			iData = nif->getBlock( nif->getLink( index, "Data" ) );
+			iData = nif->getBlockIndex( nif->getLink( index, "Data" ) );
 
 		if ( nif->isNiBlock( iData, { "NiTriShapeData", "NiTriStripsData" } ) )
 			return iData;
 
-		if ( nif->isNiBlock( index, { "BSTriShape", "BSMeshLODTriShape", "BSSubIndexTriShape" } ) ) {
+		if ( nif->isNiBlock( index, { "BSTriShape", "BSMeshLODTriShape", "BSSubIndexTriShape", "BSDynamicTriShape" } ) ) {
 			auto vf = nif->get<BSVertexDesc>( index, "Vertex Desc" );
-			if ( (vf & VertexFlags::VF_SKINNED) && nif->getUserVersion2() == 100 ) {
+			if ( (vf & VertexFlags::VF_SKINNED) && nif->getBSVersion() == 100 ) {
 				// Skinned SSE
 				auto skinID = nif->getLink( nif->getIndex( index, "Skin" ) );
-				auto partID = nif->getLink( nif->getBlock( skinID, "NiSkinInstance" ), "Skin Partition" );
-				auto iPartBlock = nif->getBlock( partID, "NiSkinPartition" );
+				auto partID = nif->getLink( nif->getBlockIndex( skinID, "NiSkinInstance" ), "Skin Partition" );
+				auto iPartBlock = nif->getBlockIndex( partID, "NiSkinPartition" );
 				if ( iPartBlock.isValid() )
 					return nif->getIndex( iPartBlock, "Vertex Data" );
 			}
@@ -76,7 +77,7 @@ public:
 			}
 		};
 
-		if ( nif->getUserVersion2() < 100 ) {
+		if ( nif->getBSVersion() < 100 ) {
 			QVector<Vector3> verts = nif->getArray<Vector3>( iData, "Vertices" );
 			QVector<Triangle> triangles;
 			QModelIndex iPoints = nif->getIndex( iData, "Points" );
@@ -85,7 +86,7 @@ public:
 				QVector<QVector<quint16> > strips;
 
 				for ( int r = 0; r < nif->rowCount( iPoints ); r++ )
-					strips.append( nif->getArray<quint16>( iPoints.child( r, 0 ) ) );
+					strips.append( nif->getArray<quint16>( QModelIndex_child( iPoints, r ) ) );
 
 				triangles = triangulate( strips );
 			} else {
@@ -94,17 +95,17 @@ public:
 
 
 			QVector<Vector3> norms( verts.count() );
-			
+
 			faceNormals( verts, triangles, norms );
 
 			nif->set<int>( iData, "Has Normals", 1 );
-			nif->updateArray( iData, "Normals" );
+			nif->updateArraySize( iData, "Normals" );
 			nif->setArray<Vector3>( iData, "Normals", norms );
 		} else {
 			QVector<Triangle> triangles;
 			int numVerts;
 			auto vf = nif->get<BSVertexDesc>( index, "Vertex Desc" );
-			if ( !((vf & VertexFlags::VF_SKINNED) && nif->getUserVersion2() == 100) ) {
+			if ( !((vf & VertexFlags::VF_SKINNED) && nif->getBSVersion() == 100) ) {
 				numVerts = nif->get<int>( index, "Num Vertices" );
 				triangles = nif->getArray<Triangle>( index, "Triangles" );
 			} else {
@@ -113,20 +114,28 @@ public:
 				numVerts = nif->get<uint>( iPart, "Data Size" ) / nif->get<uint>( iPart, "Vertex Size" );
 
 				// Get triangles from all partitions
-				auto numParts = nif->get<int>( iPart, "Num Skin Partition Blocks" );
-				auto iParts = nif->getIndex( iPart, "Partition" );
+				auto numParts = nif->get<int>( iPart, "Num Partitions" );
+				auto iParts = nif->getIndex( iPart, "Partitions" );
 				for ( int i = 0; i < numParts; i++ )
-					triangles << nif->getArray<Triangle>( iParts.child( i, 0 ), "Triangles" );
+					triangles << nif->getArray<Triangle>( QModelIndex_child( iParts, i ), "Triangles" );
 			}
 
 			QVector<Vector3> verts;
 			verts.reserve( numVerts );
 			QVector<Vector3> norms( numVerts );
 
-			for ( int i = 0; i < numVerts; i++ ) {
-				auto idx = nif->index( i, 0, iData );
+			if ( nif->isNiBlock(index, "BSDynamicTriShape") ) {
+				auto dynVerts = nif->getArray<Vector4>(index, "Vertices");
+				verts.clear();
+				verts.reserve(numVerts);
+				for ( const auto & v : dynVerts )
+					verts << Vector3(v);
+			} else {
+				for ( int i = 0; i < numVerts; i++ ) {
+					auto idx = nif->index(i, 0, iData);
 
-				verts += nif->get<Vector3>( idx, "Vertex" );
+					verts += nif->get<Vector3>(idx, "Vertex");
+				}
 			}
 
 			faceNormals( verts, triangles, norms );
@@ -196,12 +205,12 @@ public:
 
 		int numVerts = 0;
 
-		if ( nif->getUserVersion2() < 100 ) {
+		if ( nif->getBSVersion() < 100 ) {
 			verts = nif->getArray<Vector3>( iData, "Vertices" );
 			norms = nif->getArray<Vector3>( iData, "Normals" );
 		} else {
 			auto vf = nif->get<BSVertexDesc>( index, "Vertex Desc" );
-			if ( !((vf & VertexFlags::VF_SKINNED) && nif->getUserVersion2() == 100) ) {
+			if ( !((vf & VertexFlags::VF_SKINNED) && nif->getBSVersion() == 100) ) {
 				numVerts = nif->get<int>( index, "Num Vertices" );
 			} else {
 				// Skinned SSE
@@ -219,6 +228,14 @@ public:
 				verts += nif->get<Vector3>( idx, "Vertex" );
 				norms += nif->get<ByteVector3>( idx, "Normal" );
 			}
+		}
+
+		if ( nif->isNiBlock(index, "BSDynamicTriShape") ) {
+			auto dynVerts = nif->getArray<Vector4>(index, "Vertices");
+			verts.clear();
+			verts.reserve( numVerts );
+			for ( const auto & v : dynVerts )
+				verts << Vector3(v);
 		}
 
 		if ( verts.isEmpty() || verts.count() != norms.count() )
@@ -262,7 +279,7 @@ public:
 			return index;
 
 
-		float maxa = angle->value() / 180 * PI;
+		float maxa = deg2rad( angle->value() );
 		float maxd = dist->value();
 
 		QVector<Vector3> snorms( norms );
@@ -288,7 +305,7 @@ public:
 		for ( int i = 0; i < verts.count(); i++ )
 			snorms[i].normalize();
 
-		if ( nif->getUserVersion2() < 100 ) {
+		if ( nif->getBSVersion() < 100 ) {
 			nif->setArray<Vector3>( iData, "Normals", snorms );
 		} else {
 			// Pause updates between model/view
@@ -297,7 +314,6 @@ public:
 				nif->set<ByteVector3>( nif->index( i, 0, iData ), "Normal", snorms[i] );
 			nif->resetState();
 		}
-		
 
 		return index;
 	}
@@ -317,7 +333,7 @@ public:
 	bool isApplicable( const NifModel * nif, const QModelIndex & index ) override final
 	{
 		return ( nif->getValue( index ).type() == NifValue::tVector3 )
-		       || ( nif->isArray( index ) && nif->getValue( index.child( 0, 0 ) ).type() == NifValue::tVector3 );
+		       || ( nif->isArray( index ) && nif->getValue( QModelIndex_child( index ) ).type() == NifValue::tVector3 );
 	}
 
 	QModelIndex cast( NifModel * nif, const QModelIndex & index ) override final

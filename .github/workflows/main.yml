@@ -1,0 +1,76 @@
+name: Build NifSkope
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+jobs:
+  build_windows:
+    runs-on: windows-latest
+    name: Build MSYS2
+    
+    steps:
+    - name: 'Checkout'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+    
+    - name: 'Setup MSYS2'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        cache: true
+        install: 'base-devel mingw-w64-ucrt-x86_64-gcc msys/p7zip mingw-w64-ucrt-x86_64-qt5-base mingw-w64-ucrt-x86_64-qt5-3d mingw-w64-ucrt-x86_64-qt5-imageformats'
+    
+    - name: 'Build with qmake'
+      shell: msys2 {0}
+      run: |
+        qmake noavx2=1 NifSkope.pro
+        make -j 12
+        mv -f release/NifSkope.exe release/NifSkope_noavx2.exe
+        make clean
+        qmake NifSkope.pro
+        make -j 12
+    
+    - name: 'Upload Artifacts'
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-win
+        path: |
+          release
+  
+  
+  build_linux:
+    runs-on: ubuntu-latest
+    name: Build Linux
+      
+    steps:
+    - name: 'Checkout'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+      
+    - name: 'Install required packages'
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+          packages: libsdl2-dev qtbase5-dev qt5-qmake qt5-image-formats-plugins
+          version: 1.0
+      
+    - name: 'Build with qmake'
+      run: |
+        x86_64-linux-gnu-qmake noavx2=1 NifSkope.pro
+        make -j 12
+        mv -f release/NifSkope release/NifSkope_noavx2
+        make clean
+        x86_64-linux-gnu-qmake NifSkope.pro
+        make -j 12
+      
+    - name: 'Upload Artifacts'
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-linux
+        path: 'release'

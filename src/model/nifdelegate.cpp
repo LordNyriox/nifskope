@@ -119,7 +119,8 @@ public:
 
 					// Yes/No toggle for bool types
 					if ( nv.type() == NifValue::tBool ) {
-						nv.set<int>( !nv.get<int>() );
+						int oldv = nv.get<int>( nullptr, nullptr );
+						nv.set<int>( oldv ? 0 : 1, nullptr, nullptr );
 						model->setData( index, nv.toVariant(), Qt::EditRole );
 						return true;
 					}
@@ -165,7 +166,7 @@ public:
 
 		// Color the field background if the value type is a color
 		//	Otherwise normal behavior
-		QVariant color = index.data( Qt::BackgroundColorRole );
+		QVariant color = index.data( Qt::BackgroundRole );
 		if ( color.canConvert<QColor>() )
 			painter->fillRect( option.rect, color.value<QColor>() );
 		else if ( option.state & QStyle::State_Selected )
@@ -195,7 +196,7 @@ public:
 		// Increase height by 25%
 		height *= 1.25;
 
-		return {option.fontMetrics.width( text ), height};
+		return {option.fontMetrics.horizontalAdvance( text ), int( height )};
 	}
 
 	QWidget * createEditor( QWidget * parent, const QStyleOptionViewItem &, const QModelIndex & index ) const override final
@@ -248,7 +249,7 @@ public:
 			cedit->clear();
 			QString t = index.sibling( index.row(), NifModel::TypeCol ).data( NifSkopeDisplayRole ).toString();
 			const NifValue::EnumOptions & eo = NifValue::enumOptionData( t );
-			quint32 value = v.value<NifValue>().toCount();
+			quint32 value = v.value<NifValue>().toCount( nullptr, nullptr );
 			QMapIterator<quint32, QPair<QString, QString> > it( eo.o );
 
 			while ( it.hasNext() ) {
@@ -273,7 +274,7 @@ public:
 			} else {
 				cedit->setCurrentIndex( cedit->findText( NifValue::enumOptionName( t, value ) ) );
 			}
-				
+
 
 		} else if ( ledit ) {
 			ledit->setText( v.toString() );
@@ -315,7 +316,7 @@ public:
 
 			if ( v.canConvert<NifValue>() ) {
 				NifValue nv = v.value<NifValue>();
-				nv.setCount( x );
+				nv.setCount( x, nullptr, nullptr );
 				v.setValue( nv );
 
 				// Value is unchanged, do not push to Undo Stack or call setData()

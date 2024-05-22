@@ -43,6 +43,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 #include <string>
 
+#include "material.hpp"
 
 //! @file renderer.h Renderer, Renderer::ConditionSingle, Renderer::ConditionGroup, Renderer::Shader, Renderer::Program
 
@@ -93,7 +94,10 @@ public:
 		SAMP_BASE = 0,
 		SAMP_NORMAL,
 		SAMP_SPECULAR,
+		SAMP_REFLECTIVITY,
+		SAMP_LIGHTING,
 		SAMP_CUBE,
+		SAMP_CUBE_2,
 		SAMP_ENV_MASK,
 		SAMP_GLOW,
 		SAMP_HEIGHT,
@@ -143,6 +147,7 @@ public:
 		POW_BACK,
 		POW_FRESNEL,
 		POW_RIM,
+		HAS_SPECULAR,
 		SPEC_COLOR,
 		SPEC_GLOSS,
 		SPEC_SCALE,
@@ -151,8 +156,12 @@ public:
 		USE_FALLOFF,
 		UV_OFFSET,
 		UV_SCALE,
+		SKINNED,
 		GPU_SKINNED,
 		GPU_BONES,
+		WIREFRAME,
+		SOLID_COLOR,
+		LUM_EMIT,
 
 		NUM_UNIFORM_TYPES
 	} UniformType;
@@ -251,7 +260,7 @@ public:
 			CT_DECAL1,
 			CT_DECAL2,
 			CT_DECAL3,
-			CT_TANGENT,
+			CT_TANGENT = 24,
 			CT_BITANGENT,
 			CT_BONE,
 			CT_WEIGHT
@@ -270,7 +279,10 @@ public:
 			"BaseMap",
 			"NormalMap",
 			"SpecularMap",
+			"ReflMap",
+			"LightingMap",
 			"CubeMap",
+			"CubeMap2",
 			"EnvironmentMap",
 			"GlowMap",
 			"HeightMap",
@@ -319,6 +331,7 @@ public:
 			"backlightPower",
 			"fresnelPower",
 			"rimPower",
+			"hasSpecular",
 			"specColor",
 			"specGlossiness",
 			"specStrength",
@@ -327,12 +340,30 @@ public:
 			"useFalloff",
 			"uvOffset",
 			"uvScale",
+			"isSkinned",
 			"isGPUSkinned",
-			"boneTransforms"
+			"boneTransforms",
+			"isWireframe",
+			"solidColor",
+			"fLumEmittance"
 		} };
 
 		int uniformLocations[NUM_UNIFORM_TYPES];
-
+private:
+		struct UniformLocationMapItem {
+			const char *	fmt;
+			std::uint32_t	args;
+			int	l;
+			inline UniformLocationMapItem();
+			inline UniformLocationMapItem( const char *s, int arg1, int arg2 );
+			inline bool operator==( const UniformLocationMapItem & r ) const;
+			inline std::uint32_t hashFunction() const;
+		};
+		UniformLocationMapItem *	uniLocationsMap;
+		unsigned int	uniLocationsMapMask;
+		unsigned int	uniLocationsMapSize;
+		int storeUniformLocation( const UniformLocationMapItem & o, size_t i );
+public:
 		void setUniformLocations();
 
 		void uni1f( UniformType var, float x );
@@ -343,19 +374,38 @@ public:
 		void uni3m( UniformType var, const Matrix & val );
 		void uni4m( UniformType var, const Matrix4 & val );
 		bool uniSampler( class BSShaderLightingProperty * bsprop, UniformType var, int textureSlot,
-						 int & texunit, const QString & alternate, uint clamp, const QString & forced = {} );
+							int & texunit, const QString & alternate, uint clamp, const QString & forced = {} );
 		bool uniSamplerBlank( UniformType var, int & texunit );
+
+		// fmt must be a string literal, with at most two %d format
+		// integer arguments in the range 0 to 99
+		int uniLocation( const char * fmt, int arg1 = 0, int arg2 = 0 );
+		void uni1b_l( int l, bool x );
+		void uni1i_l( int l, int x );
+		void uni1f_l( int l, float x );
+		void uni2f_l( int l, float x, float y );
+		void uni4f_l( int l, FloatVector4 x, bool isSRGB = false );
+		void uni4c_l( int l, std::uint32_t c, bool isSRGB = false );
+		// l1 = texture unit variable location, l2 = texture replacement location
+		// textureReplacementMode <= 0: disabled, > 0: enabled
+		// 1: linear, 2: sRGB, 3: normal map (-1.0 to 1.0)
+		bool uniSampler_l( BSShaderLightingProperty * bsprop, int & texunit, int l1, int l2, const std::string * texturePath, std::uint32_t textureReplacement, int textureReplacementMode, const CE2Material::UVStream * uvStream );
 	};
 
 	QMap<QString, Shader *> shaders;
 	QMap<QString, Program *> programs;
 
+	bool setupProgramSF( Program *, Shape * );
 	bool setupProgram( Program *, Shape *, const PropertyList &, const QVector<QModelIndex> & iBlocks, bool eval = true );
 	void setupFixedFunction( Shape *, const PropertyList & );
 
 	struct Settings
 	{
-		bool useShaders = true;
+		bool	useShaders = true;
+		short	sfParallaxMaxSteps = 120;
+		float	sfParallaxScale = 0.04f;
+		QString	cubeMapPathFO76;
+		QString	cubeMapPathSTF;
 	} cfg;
 };
 

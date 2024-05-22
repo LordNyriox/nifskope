@@ -1,4 +1,4 @@
-#version 120
+#version 130
 
 uniform sampler2D BaseMap;
 uniform sampler2D NormalMap;
@@ -40,28 +40,30 @@ uniform float envReflection;
 
 uniform mat4 worldMatrix;
 
-varying vec3 LightDir;
-varying vec3 ViewDir;
+in vec3 LightDir;
+in vec3 ViewDir;
 
-varying vec4 A;
-varying vec4 C;
-varying vec4 D;
+in vec4 A;
+in vec4 C;
+in vec4 D;
 
-varying vec3 N;
-varying vec3 t;
-varying vec3 b;
+in mat3 tbnMatrix;
+
+mat3 tbnMatrix_norm = mat3(normalize(tbnMatrix[0]), normalize(tbnMatrix[1]), normalize(tbnMatrix[2]));
 
 
-vec3 tonemap(vec3 x)
+vec3 tonemap(vec3 x, float y)
 {
-	float _A = 0.15;
-	float _B = 0.50;
-	float _C = 0.10;
-	float _D = 0.20;
-	float _E = 0.02;
-	float _F = 0.30;
+	float a = 0.15;
+	float b = 0.50;
+	float c = 0.10;
+	float d = 0.20;
+	float e = 0.02;
+	float f = 0.30;
 
-	return ((x*(_A*x+_C*_B)+_D*_E)/(x*(_A*x+_B)+_D*_F))-_E/_F;
+	vec3 z = x * (y * 4.22978723);
+	z = (z * (a * z + b * c) + d * e) / (z * (a * z + b) + d * f) - e / f;
+	return z / (y * 0.93333333);
 }
 
 vec3 toGrayscale(vec3 color)
@@ -77,14 +79,14 @@ void main( void )
 	
 	if ( hasHeightMap ) {
 		float height = texture2D( HeightMap, offset ).r;
-		offset += E.xy * (height * 0.08 - 0.04); 
+		offset += normalize(ViewDir * tbnMatrix_norm).xy * (height * 0.08 - 0.04); 
 	}
 
 	vec4 baseMap = texture2D( BaseMap, offset );
 	vec4 normalMap = texture2D( NormalMap, offset );
 	vec4 glowMap = texture2D( GlowMap, offset );
 	
-	vec3 normal = normalize(normalMap.rgb * 2.0 - 1.0);
+	vec3 normal = normalize(tbnMatrix_norm * (normalMap.rgb * 2.0 - 1.0));
 	
 	vec3 L = normalize(LightDir);
 	vec3 R = reflect(-L, normal);
@@ -96,8 +98,7 @@ void main( void )
 	float NdotNegL = max( dot(normal, -L), 0.0 );
 
 	vec3 reflected = reflect( -E, normal );
-	vec3 reflectedVS = b * reflected.x + t * reflected.y + N * reflected.z;
-	vec3 reflectedWS = vec3( worldMatrix * (gl_ModelViewMatrixInverse * vec4( reflectedVS, 0.0 )) );
+	vec3 reflectedWS = vec3( worldMatrix * (gl_ModelViewMatrixInverse * vec4( reflected, 0.0 )) );
 
 
 	vec4 color;
@@ -171,7 +172,7 @@ void main( void )
 	}
 
 	color.rgb = albedo * (diffuse + emissive) + spec;
-	color.rgb = tonemap( color.rgb ) / tonemap( vec3(1.0) );
+	color.rgb = tonemap( color.rgb * D.a, A.a );
 	color.a = C.a * baseMap.a;
 
 	gl_FragColor = color;

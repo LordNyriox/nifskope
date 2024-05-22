@@ -74,11 +74,14 @@ public:
 	QOpenGLContext * glContext;
 	QOpenGLFunctions * glFuncs;
 
-	float brightness = 1.0;
-	float ambient = 0.375;
-	float declination = 0;
-	float planarAngle = 0;
-	bool frontalLight = true;
+	float	brightnessScale = 1.0f;		// overall brightness
+	float	ambient = 1.0f;				// environment map / ambient light level
+	float	brightnessL = 1.0f;			// directional light intensity,
+	float	lightColor = 0.0f;			// and color temperature (-1.0 to 1.0)
+	float	toneMapping = 0.23641851f;	// 0.05 to 1.0
+	float	declination = 0.0f;
+	float	planarAngle = 0.0f;
+	bool	frontalLight = true;
 
 	enum AnimationStates
 	{
@@ -130,7 +133,6 @@ public:
 	void center();
 	void move( float, float, float );
 	void rotate( float, float, float );
-	void zoom( float );
 
 	void setCenter();
 	void setDistance( float );
@@ -144,6 +146,8 @@ public:
 	void flipOrientation();
 
 	void setDebugMode( DebugMode );
+
+	float scale() { return (scene->game == Game::STARFIELD) ? 1.0 / 32.0 : 1.0; };
 
 	QColor clearColor() const;
 
@@ -162,6 +166,9 @@ public slots:
 	void saveUserView();
 	void loadUserView();
 	void setBrightness( int );
+	void setLightLevel( int );
+	void setLightColor( int );
+	void setToneMapping( int );
 	void setAmbient( int );
 	void setDeclination( int );
 	void setPlanarAngle( int );
@@ -170,6 +177,9 @@ public slots:
 	void updateAnimationState( bool checked );
 	void setVisMode( Scene::VisMode, bool checked = true );
 	void updateSettings();
+	void selectPBRCubeMap( quint32 bsVersion = 0 );
+	void selectF76CubeMap();
+	void selectSTFCubeMap();
 
 signals:
 	void clicked( const QModelIndex & );
@@ -221,6 +231,7 @@ private:
 	ViewState view;
 	DebugMode debugMode;
 	bool perspectiveMode;
+	bool gridDisabled = false;
 
 	class TexCache * textures;
 
@@ -237,7 +248,7 @@ private:
 	Transform viewTrans;
 
 	GLdouble aspect;
-	
+
 	QHash<int, bool> kbd;
 	QPoint lastPos;
 	QPoint pressPos;

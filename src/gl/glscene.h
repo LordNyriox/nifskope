@@ -36,6 +36,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "glnode.h"
 #include "glproperty.h"
 #include "gltools.h"
+#include "gltex.h"
+
+#include "gamemanager.h"
 
 #include <QFlags>
 #include <QObject>
@@ -50,7 +53,6 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 class NifModel;
 class Renderer;
-class TexCache;
 class Shape;
 class QAction;
 class QOpenGLContext;
@@ -67,7 +69,6 @@ public:
 
 	void clear( bool flushTextures = true );
 	void make( NifModel * nif, bool flushTextures = false );
-	void make( NifModel * nif, int blockNumber, QStack<int> & nodestack );
 
 	void update( const NifModel * nif, const QModelIndex & index );
 
@@ -84,11 +85,11 @@ public:
 
 	QString textStats();
 
-	int bindTexture( const QString & fname );
-	int bindTexture( const QModelIndex & index );
-
 	Node * getNode( const NifModel * nif, const QModelIndex & iNode );
 	Property * getProperty( const NifModel * nif, const QModelIndex & iProperty );
+	Property * getProperty( const NifModel * nif, const QModelIndex & iParentBlock, const QString & itemName, const QString & mustInherit );
+
+	Game::GameMode game = Game::OTHER;
 
 	enum SceneOption
 	{
@@ -116,6 +117,21 @@ public:
 	Q_DECLARE_FLAGS( SceneOptions, SceneOption );
 
 	SceneOptions options;
+	inline bool hasOption(SceneOptions optValue) const { return ( options & optValue ); }
+
+	inline int bindTexture( const QString & fname, bool useSecondTexture = false, bool forceTexturing = false )
+	{
+		if ( ( forceTexturing || hasOption(DoTexturing) ) && !fname.isEmpty() ) [[likely]]
+			return textures->bind( fname, game, useSecondTexture );
+		return 0;
+	}
+
+	inline int bindTexture( const QModelIndex & iSource )
+	{
+		if ( hasOption(DoTexturing) && iSource.isValid() ) [[likely]]
+			return textures->bind( iSource, game );
+		return 0;
+	}
 
 	enum VisModes
 	{
@@ -128,6 +144,7 @@ public:
 	Q_DECLARE_FLAGS( VisMode, VisModes );
 
 	VisMode visMode;
+	inline bool hasVisMode(VisModes modeValue) const { return ( visMode & modeValue ); }
 
 	enum SelModes
 	{
@@ -139,17 +156,20 @@ public:
 	Q_DECLARE_FLAGS( SelMode, SelModes );
 
 	SelMode selMode;
+	inline bool isSelModeObject() const { return ( selMode & SelObject ); }
+	inline bool isSelModeVertex() const { return ( selMode & SelVertex ); }
 
 	enum LodLevel
 	{
 		Level0 = 0,
 		Level1 = 1,
-		Level2 = 2
+		Level2 = 2,
+		Level3 = 3
 	};
 
 	LodLevel lodLevel;
 
-	
+
 	Renderer * renderer;
 
 	NodeList nodes;
@@ -184,6 +204,7 @@ public:
 	float timeMax() const;
 signals:
 	void sceneUpdated();
+	void disableSave();
 
 public slots:
 	void updateSceneOptions( bool checked );

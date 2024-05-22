@@ -1,4 +1,5 @@
 #include "spellbook.h"
+#include "gamemanager.h"
 
 #include <QFileDialog>
 
@@ -55,7 +56,7 @@ public:
 				QPersistentModelIndex iRoot;
 
 				for ( const auto l : kf.getRootLinks() ) {
-					QModelIndex iSeq = kf.getBlock( l, "NiControllerSequence" );
+					QModelIndex iSeq = kf.getBlockIndex( l, "NiControllerSequence" );
 
 					if ( !iSeq.isValid() )
 						throw QString( Spell::tr( "this is not a normal .kf file; there should be only NiControllerSequences as root blocks" ) );
@@ -80,20 +81,20 @@ public:
 				QStringList missingNodes;
 
 				for ( const auto lSeq : kf.getRootLinks() ) {
-					QModelIndex iSeq = kf.getBlock( lSeq, "NiControllerSequence" );
+					QModelIndex iSeq = kf.getBlockIndex( lSeq, "NiControllerSequence" );
 
 					QList<QPersistentModelIndex> controlledNodes;
 
 					QModelIndex iCtrlBlcks = kf.getIndex( iSeq, "Controlled Blocks" );
 
 					for ( int r = 0; r < kf.rowCount( iCtrlBlcks ); r++ ) {
-						QString nodeName = kf.string( iCtrlBlcks.child( r, 0 ), "Node Name", false );
+						QString nodeName = kf.resolveString( QModelIndex_child( iCtrlBlcks, r ), "Node Name" );
 
 						if ( nodeName.isEmpty() )
-							nodeName = kf.string( iCtrlBlcks.child( r, 0 ), "Target Name", false ); // 10.0.1.0
+							nodeName = kf.resolveString( QModelIndex_child( iCtrlBlcks, r ), "Target Name" ); // 10.0.1.0
 
 						if ( nodeName.isEmpty() ) {
-							QModelIndex iNodeName = kf.getIndex( iCtrlBlcks.child( r, 0 ), "Node Name Offset" );
+							QModelIndex iNodeName = kf.getIndex( QModelIndex_child( iCtrlBlcks, r ), "Node Name Offset" );
 							nodeName = iNodeName.sibling( iNodeName.row(), NifModel::ValueCol ).data( NifSkopeDisplayRole ).toString();
 						}
 
@@ -118,7 +119,7 @@ public:
 
 					setLinkArray( nif, iMultiTransformer, "Extra Targets", controlledNodes );
 
-					QPersistentModelIndex iObjPalette = nif->getBlock( nif->getLink( iCtrlManager, "Object Palette" ), "NiDefaultAVObjectPalette" );
+					QPersistentModelIndex iObjPalette = nif->getBlockIndex( nif->getLink( iCtrlManager, "Object Palette" ), "NiDefaultAVObjectPalette" );
 
 					if ( !iObjPalette.isValid() ) {
 						iObjPalette = nif->insertNiBlock( "NiDefaultAVObjectPalette", nif->getBlockNumber( iCtrlManager ) + 1 );
@@ -139,15 +140,15 @@ public:
 					qint32 nSeq = map.value( lSeq );
 					int numSeq  = nif->get<int>( iCtrlManager, "Num Controller Sequences" );
 					nif->set<int>( iCtrlManager, "Num Controller Sequences", numSeq + 1 );
-					nif->updateArray( iCtrlManager, "Controller Sequences" );
-					nif->setLink( nif->getIndex( iCtrlManager, "Controller Sequences" ).child( numSeq, 0 ), nSeq );
-					QModelIndex iSeq = nif->getBlock( nSeq, "NiControllerSequence" );
+					nif->updateArraySize( iCtrlManager, "Controller Sequences" );
+					nif->setLink( QModelIndex_child( nif->getIndex( iCtrlManager, "Controller Sequences" ), numSeq ), nSeq );
+					QModelIndex iSeq = nif->getBlockIndex( nSeq, "NiControllerSequence" );
 					nif->setLink( iSeq, "Manager", nif->getBlockNumber( iCtrlManager ) );
 
 					QModelIndex iCtrlBlcks = nif->getIndex( iSeq, "Controlled Blocks" );
 
 					for ( int r = 0; r < nif->rowCount( iCtrlBlcks ); r++ ) {
-						QModelIndex iCtrlBlck = iCtrlBlcks.child( r, 0 );
+						QModelIndex iCtrlBlck = QModelIndex_child( iCtrlBlcks, r );
 
 						if ( nif->getLink( iCtrlBlck, "Controller" ) == -1 )
 							nif->setLink( iCtrlBlck, "Controller", iMultiTransformerIdx );
@@ -175,7 +176,7 @@ public:
 
 	static QModelIndex findChildNode( const NifModel * nif, const QModelIndex & parent, const QString & name )
 	{
-		if ( !nif->inherits( parent, "NiAVObject" ) )
+		if ( !nif->blockInherits( parent, "NiAVObject" ) )
 			return QModelIndex();
 
 		QString thisName = nif->get<QString>( parent, "Name" );
@@ -184,7 +185,7 @@ public:
 			return parent;
 
 		for ( const auto l : nif->getChildLinks( nif->getBlockNumber( parent ) ) ) {
-			QModelIndex child = findChildNode( nif, nif->getBlock( l ), name );
+			QModelIndex child = findChildNode( nif, nif->getBlockIndex( l ), name );
 
 			if ( child.isValid() )
 				return child;
@@ -196,7 +197,7 @@ public:
 	static QModelIndex findRootTarget( const NifModel * nif, const QString & name )
 	{
 		for ( const auto l : nif->getRootLinks() ) {
-			QModelIndex root = findChildNode( nif, nif->getBlock( l ), name );
+			QModelIndex root = findChildNode( nif, nif->getBlockIndex( l ), name );
 
 			if ( root.isValid() )
 				return root;
@@ -208,10 +209,10 @@ public:
 	static QModelIndex findController( const NifModel * nif, const QModelIndex & node, const QString & ctrltype )
 	{
 		for ( const auto l : nif->getChildLinks( nif->getBlockNumber( node ) ) ) {
-			QModelIndex iCtrl = nif->getBlock( l, "NiTimeController" );
+			QModelIndex iCtrl = nif->getBlockIndex( l, "NiTimeController" );
 
 			if ( iCtrl.isValid() ) {
-				if ( nif->inherits( iCtrl, ctrltype ) )
+				if ( nif->blockInherits( iCtrl, ctrltype ) )
 					return iCtrl;
 
 				iCtrl = findController( nif, iCtrl, ctrltype );
@@ -223,7 +224,7 @@ public:
 		return QModelIndex();
 	}
 
-	static QModelIndex attachController( NifModel * nif, const QPersistentModelIndex & iNode, const QString & ctrltype, bool fast = false )
+	static QModelIndex attachController( NifModel * nif, const QPersistentModelIndex & iNode, const QString & ctrltype, [[maybe_unused]] bool fast = false )
 	{
 		QModelIndex iCtrl = nif->insertNiBlock( ctrltype, nif->getBlockNumber( iNode ) + 1 );
 
@@ -249,13 +250,13 @@ public:
 
 		QVector<qint32> links = nif->getLinkArray( iArray );
 
-		for ( const QModelIndex& iBlock : iBlocks ) {
+		for ( const QPersistentModelIndex& iBlock : iBlocks ) {
 			if ( !links.contains( nif->getBlockNumber( iBlock ) ) )
 				links.append( nif->getBlockNumber( iBlock ) );
 		}
 
 		nif->set<int>( iNum, links.count() );
-		nif->updateArray( iArray );
+		nif->updateArraySize( iArray );
 		nif->setLinkArray( iArray, links );
 	}
 
@@ -274,7 +275,7 @@ public:
 			int r;
 
 			for ( r = 0; r < nif->rowCount( iArray ); r++ ) {
-				if ( nif->get<QString>( iArray.child( r, 0 ), "Name" ) == name )
+				if ( nif->get<QString>( QModelIndex_child( iArray, r ), "Name" ) == name )
 					break;
 			}
 
@@ -284,10 +285,10 @@ public:
 
 		int r = nif->get<int>( iNum );
 		nif->set<int>( iNum, r + blocksToAdd.count() );
-		nif->updateArray( iArray );
+		nif->updateArraySize( iArray );
 		for ( const QPersistentModelIndex& idx : blocksToAdd ) {
-			nif->set<QString>( iArray.child( r, 0 ), "Name", nif->get<QString>( idx, "Name" ) );
-			nif->setLink( iArray.child( r, 0 ), "AV Object", nif->getBlockNumber( idx ) );
+			nif->set<QString>( QModelIndex_child( iArray, r ), "Name", nif->get<QString>( idx, "Name" ) );
+			nif->setLink( QModelIndex_child( iArray, r ), "AV Object", nif->getBlockNumber( idx ) );
 			r++;
 		}
 	}
@@ -312,7 +313,7 @@ public:
 
 	bool isApplicable( const NifModel * nif, const QModelIndex & index ) override final
 	{
-		QModelIndex iBlock = nif->getBlock( index, "NiKeyframeData" );
+		QModelIndex iBlock = nif->getBlockIndex( index, "NiKeyframeData" );
 		return iBlock.isValid() && nif->get<int>( iBlock, "Rotation Type" ) != 4;
 	}
 
@@ -322,20 +323,20 @@ public:
 	    QModelIndex iQuats = nif->getIndex( index, "Quaternion Keys" );
 	    int rotationType = nif->get<int>( index, "Rotation Type" );
 	    nif->set<int>( index, "Rotation Type", 4 );
-	    nif->updateArray( index, "XYZ Rotations" );
+	    nif->updateArraySize( index, "XYZ Rotations" );
 	    QModelIndex iRots = nif->getIndex( index, "XYZ Rotations" );
 
 	    for( int i = 0; i < 3; i++ )
 	    {
-	        QModelIndex iRot = iRots.child( i, 0 );
+	        QModelIndex iRot = QModelIndex_child( iRots, i );
 	        nif->set<int>( iRot, "Num Keys", nif->get<int>(index, "Num Rotation Keys") );
 	        nif->set<int>( iRot, "Interpolation", rotationType );
-	        nif->updateArray( iRot, "Keys" );
+	        nif->updateArraySize( iRot, "Keys" );
 	    }
 
 	    for ( int q = 0; q < nif->rowCount( iQuats ); q++ )
 	    {
-	        QModelIndex iQuat = iQuats.child( q, 0 );
+	        QModelIndex iQuat = QModelIndex_child( iQuats, q );
 
 	        float time = nif->get<float>( iQuat, "Time" );
 	        Quat value = nif->get<Quat>( iQuat, "Value" );
@@ -346,9 +347,9 @@ public:
 	        float x, y, z;
 	        tlocal.toEuler( x, y, z );
 
-	        QModelIndex xRot = iRots.child( 0, 0 );
-	        QModelIndex yRot = iRots.child( 1, 0 );
-	        QModelIndex zRot = iRots.child( 2, 0 );
+	        QModelIndex xRot = QModelIndex_child( iRots );
+	        QModelIndex yRot = QModelIndex_child( iRots, 1 );
+	        QModelIndex zRot = QModelIndex_child( iRots, 2 );
 
 	        xRot = nif->getIndex( xRot, "Keys" );
 
@@ -369,15 +370,17 @@ public:
 
 	bool isApplicable( const NifModel * nif, const QModelIndex & index ) override final
 	{
-		QModelIndex iBlock = nif->getBlock( index, "NiDefaultAVObjectPalette" );
+		QModelIndex iBlock = nif->getBlockIndex( index, "NiDefaultAVObjectPalette" );
 		return iBlock.isValid();
 	}
 
-	
+
 	QModelIndex cast( NifModel * nif, const QModelIndex & index ) override final
 	{
-		auto iHeader = nif->getHeader();
+		auto iHeader = nif->getHeaderIndex();
+#if 0
 		auto numStrings = nif->get<int>( iHeader, "Num Strings" );
+#endif
 		auto strings = nif->getArray<QString>( iHeader, "Strings" );
 
 		auto numBlocks = nif->get<int>( iHeader, "Num Blocks" );
@@ -388,7 +391,7 @@ public:
 		auto objs = nif->getIndex( index, "Objs" );
 		auto numObjs = nif->rowCount( objs );
 		for ( int i = 0; i < numObjs; i++ ) {
-			auto c = objs.child( i, 0 );
+			auto c = QModelIndex_child( objs, i );
 			auto iAV = nif->getIndex( c, "AV Object" );
 
 
@@ -400,10 +403,10 @@ public:
 				auto stringIndex = strings.indexOf( name );
 				if ( stringIndex >= 0 ) {
 					for ( int j = 0; j < numBlocks; j++ ) {
-						auto iBlock = nif->getBlock( j );
+						auto iBlock = nif->getBlockIndex( j );
 
-						if ( nif->inherits( iBlock, "NiAVObject" ) ) {
-							auto blockName = nif->get<QString>( nif->getBlock( j ), "Name" );
+						if ( nif->blockInherits( iBlock, "NiAVObject" ) ) {
+							auto blockName = nif->get<QString>( nif->getBlockIndex( j ), "Name" );
 							if ( name == blockName ) {
 								nif->setLink( iAV, j );
 								fixed++;

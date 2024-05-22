@@ -30,18 +30,21 @@ defineReplace(getSed) {
 		SEDPATH = /sed.exe
 
 		exists($${GNUWIN32}$${SEDPATH}) {
-			sedbin = $${GNUWIN32}$${SEDPATH}
+			sedbin = $${GNUWIN32}$${QMAKE_DIR_SEP}
 		} else:exists($${CYGWIN}$${SEDPATH}) {
-			sedbin = $${CYGWIN}$${SEDPATH}
+			sedbin = $${CYGWIN}$${QMAKE_DIR_SEP}
 		} else:exists($${CYGWIN64}$${SEDPATH}) {
-			sedbin = $${CYGWIN64}$${SEDPATH}
+			sedbin = $${CYGWIN64}$${QMAKE_DIR_SEP}
 		} else {
 			#message(Neither GnuWin32 or Cygwin were found)
-			sedbin = $$system(where sed 2> NUL)
+			SEDSYS = $$system(where sed 2> NUL)
+			SEDLIST = $$split(SEDSYS, "sed.exe")
+			SEDBIN = $$member(SEDLIST, 0)
+			sedbin = $$syspath($${SEDBIN})
 		}
 		
 		!isEmpty(sedbin) {
-			sedbin = \"$${sedbin}\"
+			sedbin = \"$${sedbin}sed.exe\"
 		}
 	}
 
@@ -177,7 +180,27 @@ defineReplace(QtBins) {
         # Copies libgcc*-*, libstdc++-*, libwinpthread-*
         #   Note: As of Qt 5.5, changed `lib*` to `lib*-*` in order to avoid unneeded libs.
 		list += \
-            $$[QT_INSTALL_BINS]/lib*-*.dll
+            # $$[QT_INSTALL_BINS]/SDL2.dll \
+            $$[QT_INSTALL_BINS]/libbrotlicommon.dll \
+            $$[QT_INSTALL_BINS]/libbrotlidec.dll \
+            $$[QT_INSTALL_BINS]/libbz2-1.dll \
+            $$[QT_INSTALL_BINS]/libdouble-conversion.dll \
+            $$[QT_INSTALL_BINS]/libfreetype-6.dll \
+            $$[QT_INSTALL_BINS]/libgcc_s_seh-1.dll \
+            $$[QT_INSTALL_BINS]/libglib-2.*.dll \
+            $$[QT_INSTALL_BINS]/libgraphite2.dll \
+            $$[QT_INSTALL_BINS]/libharfbuzz-0.dll \
+            $$[QT_INSTALL_BINS]/libiconv-2.dll \
+            $$[QT_INSTALL_BINS]/libicu*.dll \
+            $$[QT_INSTALL_BINS]/libintl-8.dll \
+            $$[QT_INSTALL_BINS]/libjpeg-8.dll \
+            $$[QT_INSTALL_BINS]/libmd4c.dll \
+            $$[QT_INSTALL_BINS]/libpcre2-*.dll \
+            $$[QT_INSTALL_BINS]/libpng16-*.dll \
+            $$[QT_INSTALL_BINS]/libstdc++-6.dll \
+            $$[QT_INSTALL_BINS]/libwinpthread-1.dll \
+            $$[QT_INSTALL_BINS]/libzstd.dll \
+            $$[QT_INSTALL_BINS]/zlib1.dll
 	}
 
 	return($$list)
