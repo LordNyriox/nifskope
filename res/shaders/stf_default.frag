@@ -252,6 +252,20 @@ mat3 btnMatrix_norm = mat3( normalize( btnMatrix[0] ), normalize( btnMatrix[1] )
 
 #define FLT_EPSILON 1.192092896e-07F // smallest such that 1.0 + FLT_EPSILON != 1.0
 
+float emissiveIntensity( bool useAdaptive, bool adaptiveLimits, vec4 luminanceParams )
+{
+	float	l = luminanceParams[0];	// luminousEmittance
+
+	if ( useAdaptive ) {
+		l = dot( A.rgb * 80.0 + D.rgb * 320.0, vec3(0.2126, 0.7152, 0.0722) );
+		l = l * exp2( luminanceParams[1] * 0.5 );	// exposureOffset
+		if ( adaptiveLimits )	// maxOffsetEmittance, minOffsetEmittance
+			l = clamp( l, luminanceParams[3], luminanceParams[2] );
+	}
+
+	return l * 0.0025;
+}
+
 vec3 LightingFuncGGX_REF(float NdotL, float LdotR, float NdotV, float roughness)
 {
 	float alpha = roughness * roughness;
@@ -400,6 +414,8 @@ void main(void)
 		discard;
 
 	vec4	baseMap = vec4(1.0);
+	if ( lm.isEffect && ( lm.effectSettings.emissiveOnlyEffect || lm.effectSettings.emissiveOnlyAutomaticallyApplied ) )
+		baseMap.rgb = vec3(0.0);
 	vec3	normal = vec3(0.0, 0.0, 1.0);
 	vec3	pbrMap = vec3(0.75, 0.0, 1.0);	// roughness, metalness, AO
 	float	alpha = 1.0;
@@ -444,8 +460,9 @@ void main(void)
 
 		if ( lm.layers[i].material.textureSet.textures[2] != 0 ) {
 			// _opacity.dds
-			if ( lm.isEffect && lm.hasOpacityComponent && i == lm.opacity.firstLayerIndex ) {
-				baseMap.a *= getLayerTexture( i, 2, offset ).r;
+			if ( lm.isEffect ) {
+				if ( i == (lm.hasOpacityComponent ? lm.opacity.firstLayerIndex : 0) )
+					baseMap.a *= getLayerTexture( i, 2, offset ).r;
 			} else if ( lm.alphaSettings.hasOpacity && i == lm.alphaSettings.opacitySourceLayer ) {
 				if ( (lm.layers[i].material.flags & 0xFFFC) == 0 )
 					baseMap.a *= getLayerTexture( i, 2, getTexCoord(lm.alphaSettings.opacityUVstream) ).r;
@@ -521,11 +538,11 @@ void main(void)
 	vec4	color;
 	vec3	albedo = baseMap.rgb;
 
-	// emissive intensity (FIXME: this is probably incorrect)
+	// emissive intensity
 	if ( lm.emissiveSettings.isEnabled ) {
-		emissive *= exp2( lm.emissiveSettings.exposureOffset * 0.5 );
+		emissive *= emissiveIntensity( lm.emissiveSettings.adaptiveEmittance, lm.emissiveSettings.enableAdaptiveLimits, vec4(lm.emissiveSettings.luminousEmittance, lm.emissiveSettings.exposureOffset, lm.emissiveSettings.maxOffsetEmittance, lm.emissiveSettings.minOffsetEmittance) );
 	} else if ( lm.layeredEmissivity.isEnabled ) {
-		emissive *= exp2( lm.layeredEmissivity.exposureOffset * 0.5 );
+		emissive *= emissiveIntensity( lm.layeredEmissivity.adaptiveEmittance, lm.layeredEmissivity.enableAdaptiveLimits, vec4(lm.layeredEmissivity.luminousEmittance, lm.layeredEmissivity.exposureOffset, lm.layeredEmissivity.maxOffsetEmittance, lm.layeredEmissivity.minOffsetEmittance) );
 	}
 
 	vec3	f0 = mix(vec3(0.04), albedo, pbrMap.g);
@@ -555,7 +572,7 @@ void main(void)
 		refl *= ambient;
 		ambient *= textureLod(CubeMap2, normalWS, 0.0).rgb;
 	} else {
-		ambient /= 12.5;
+		ambient *= 0.08;
 		refl = ambient;
 	}
 	vec3	f = mix(f0, vec3(1.0), envLUT.r);
